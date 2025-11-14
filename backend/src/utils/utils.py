@@ -442,3 +442,130 @@ def check_if_answered(events_log) -> bool:
 
 
 
+
+import os
+import uuid
+import logging
+import boto3
+from botocore.exceptions import ClientError
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class CloudflareR2Storage:
+    """
+    Cloudflare R2 Storage Handler (S3-compatible)
+    """
+    def __init__(self):
+        self.account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID")
+        self.access_key_id = os.getenv("CLOUDFLARE_ACCESS_KEY_ID")
+        self.secret_access_key = os.getenv("CLOUDFLARE_SECRET_ACCESS_KEY")
+        self.bucket_name = os.getenv("CLOUDFLARE_BUCKET_NAME")
+        self.public_url = os.getenv("CLOUDFLARE_PUBLIC_URL")  
+        
+        if not all([self.account_id, self.access_key_id, self.secret_access_key, self.bucket_name]):
+            raise ValueError("Missing Cloudflare R2 credentials in .env")
+        
+        # Initialize S3 client for R2
+        self.s3_client = boto3.client(
+            's3',
+            endpoint_url=f'https://{self.account_id}.r2.cloudflarestorage.com',
+            aws_access_key_id=self.access_key_id,
+            aws_secret_access_key=self.secret_access_key,
+            region_name='auto'  # R2 uses 'auto'
+        )
+        
+        logging.info(f"✅ Cloudflare R2 initialized: {self.bucket_name}")
+    
+    def upload_avatar(self, file_content: bytes, file_extension: str) -> str:
+        """
+        Upload agent avatar to R2 bucket.
+        
+        Args:
+            file_content: Binary image data
+            file_extension: File extension (jpg, png, etc.)
+        
+        Returns:
+            Public URL of uploaded image
+        """
+        try:
+            # Generate unique filename
+            filename = f"avatars/{uuid.uuid4()}.{file_extension}"
+            
+            # Determine content type
+            content_type_map = {
+                'jpg': 'image/jpeg',
+                'jpeg': 'image/jpeg',
+                'png': 'image/png',
+                'gif': 'image/gif',
+                'webp': 'image/webp'
+            }
+            content_type = content_type_map.get(file_extension.lower(), 'application/octet-stream')
+            
+            # Upload to R2
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=filename,
+                Body=file_content,
+                ContentType=content_type,
+                CacheControl='public, max-age=31536000'  # Cache for 1 year
+            )
+            
+            # Generate public URL
+            if self.public_url:
+                public_url = f"{self.public_url}/{filename}"
+            else:
+                # Fallback to account-based URL
+                public_url = f"https://{self.account_id}.r2.cloudflarestorage.com/{self.bucket_name}/{filename}"
+            
+            logging.info(f"✅ Uploaded avatar: {public_url}")
+            return public_url
+            
+        except ClientError as e:
+            logging.error(f"❌ R2 upload failed: {e}")
+            raise
+        except Exception as e:
+            logging.error(f"❌ Upload error: {e}")
+            raise
+    
+    def delete_avatar(self, file_url: str) -> bool:
+        """
+        Delete avatar from R2 bucket.
+        
+        Args:
+            file_url: Full URL of the file to delete
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Extract key from URL
+            if self.public_url in file_url:
+                key = file_url.replace(f"{self.public_url}/", "")
+            else:
+                # Extract from account URL
+                parts = file_url.split(f"{self.bucket_name}/")
+                if len(parts) == 2:
+                    key = parts[1]
+                else:
+                    logging.warning(f"Could not parse URL: {file_url}")
+                    return False
+            
+            self.s3_client.delete_object(
+                Bucket=self.bucket_name,
+                Key=key
+            )
+            
+            logging.info(f"✅ Deleted avatar: {key}")
+            return True
+            
+        except ClientError as e:
+            logging.error(f"❌ R2 delete failed: {e}")
+            return False
+        except Exception as e:
+            logging.error(f"❌ Delete error: {e}")
+            return False
+
+
+# Singleton instance
+r2_storage = CloudflareR2Storage()

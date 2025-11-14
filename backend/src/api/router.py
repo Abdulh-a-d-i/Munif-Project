@@ -15,6 +15,8 @@ from fastapi import (
     Query,
     Request,
 )
+
+
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -35,9 +37,9 @@ from src.api.base_models import (
 from src.utils.db import PGDB 
 from src.utils.mail_management import Send_Mail
 from src.utils.jwt_utils import create_access_token
-from src.utils.utils import get_current_user, add_call_event, get_livekit_call_status, fetch_and_store_transcript, fetch_and_store_recording, calculate_duration, check_if_answered
+from src.utils.utils import get_current_user, add_call_event, get_livekit_call_status, fetch_and_store_transcript, fetch_and_store_recording, calculate_duration, check_if_answered, r2_storage
 from livekit import api
-
+from fastapi import File, UploadFile, Form
 load_dotenv()
 
 router = APIRouter()
@@ -385,7 +387,7 @@ async def save_call_data(request: Request):
         
         return JSONResponse({"success": True})
     except Exception as e:
-        logging.error(f"❌ save_call_data error: {e}")
+        logging.error(f" save_call_data error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 # ==================== RECORDING STREAMING ====================
@@ -462,7 +464,7 @@ async def stream_call_recording(
         
         raise HTTPException(status_code=404, detail="Recording not found")
     except Exception as e:
-        logging.error(f"❌ Error: {e}")
+        logging.error(f" Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/calls/{call_id}/transcript")
@@ -613,7 +615,7 @@ async def new_call(phone_number: str = Query(...), call_id: str = Query(...)):
             call_id=call_id,
             status="initialized"
         )
-        logger.info(f"✅ Inserted initial call history for call_id: {call_id}")
+        logger.info(f" Inserted initial call history for call_id: {call_id}")
         
         # Generate dynamic data based on industry (example for automobile)
         dynamic_data = {}
@@ -667,30 +669,6 @@ async def get_dashboard_analytics(current_user: dict = Depends(get_current_user)
         return error_response("Failed to fetch analytics", 500)
 
 
-@router.get("/top-agents")
-async def get_top_agents(
-    limit: int = Query(5, ge=1, le=20),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Get top performing agents by call volume.
-    Default: Top 5 agents
-    """
-    try:
-        user_id = current_user["id"]
-        top_agents = db.get_top_agents(user_id, limit)
-        
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "data": top_agents,
-                "count": len(top_agents)
-            }
-        )
-    except Exception as e:
-        logging.error(f"Error fetching top agents: {e}")
-        return error_response("Failed to fetch top agents", 500)
 
 
 @router.get("/agents")
@@ -756,36 +734,77 @@ async def get_agent_detail(
 
 @router.post("/agents")
 async def create_agent(
-    request: CreateAgentRequest,
+    agent_name: str = Form(...),
+    phone_number: str = Form(...),
+    system_prompt: str = Form(...),
+    voice_type: str = Form(...),
+    language: str = Form("en"),
+    industry: str = Form(None),
+    owner_name: str = Form(None),
+    avatar: UploadFile = File(None),  # Optional image file
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Create a new agent.
-    Required fields:
-    - agent_name
-    - phone_number
-    - system_prompt
-    - voice_type (male/female)
+    Create a new agent with optional avatar image.
+    
+    Form data:
+    - agent_name: Agent display name
+    - phone_number: Unique phone number
+    - system_prompt: AI system prompt
+    - voice_type: "male" or "female"
+    - language: Language code (default: "en")
+    - industry: Industry category (optional)
+    - owner_name: Owner name (optional)
+    - avatar: Image file (optional, jpg/png/gif/webp)
     """
     try:
         user_id = current_user["id"]
         
         # Check if phone number already exists
-        existing = db.get_agent_by_phone(request.phone_number)
+        existing = db.get_agent_by_phone(phone_number)
         if existing:
             return error_response("Phone number already in use", 400)
         
+        # Upload avatar if provided
+        avatar_url = None
+        if avatar and avatar.filename:
+            # Validate file type
+            allowed_extensions = {'jpg', 'jpeg', 'png', 'gif', 'webp'}
+            file_extension = avatar.filename.split('.')[-1].lower()
+            
+            if file_extension not in allowed_extensions:
+                return error_response(
+                    f"Invalid file type. Allowed: {', '.join(allowed_extensions)}", 
+                    400
+                )
+            
+            # Validate file size (max 5MB)
+            content = await avatar.read()
+            if len(content) > 5 * 1024 * 1024:
+                return error_response("File too large. Maximum size: 5MB", 400)
+            
+            # Upload to R2
+            try:
+                avatar_url = r2_storage.upload_avatar(content, file_extension)
+                logging.info(f" Avatar uploaded: {avatar_url}")
+            except Exception as e:
+                logging.error(f" Avatar upload failed: {e}")
+                return error_response("Failed to upload avatar", 500)
+        
+        # Create agent data
         agent_data = {
-            "agent_name": request.agent_name,
-            "phone_number": request.phone_number,
-            "system_prompt": request.system_prompt,
-            "voice_type": request.voice_type,
-            "language": request.language,
-            "industry": request.industry,
-            "owner_name": request.owner_name,
+            "agent_name": agent_name,
+            "phone_number": phone_number,
+            "system_prompt": system_prompt,
+            "voice_type": voice_type,
+            "language": language,
+            "industry": industry,
+            "owner_name": owner_name,
+            "avatar_url": avatar_url,
             "admin_id": user_id
         }
         
+        # Save to database
         agent = db.create_agent_with_voice_type(agent_data)
         
         return JSONResponse(
@@ -796,50 +815,98 @@ async def create_agent(
                 "data": agent
             }
         )
+        
     except ValueError as e:
         return error_response(str(e), 400)
     except Exception as e:
         logging.error(f"Error creating agent: {e}")
+        traceback.print_exc()
         return error_response("Failed to create agent", 500)
 
 
 @router.put("/agents/{agent_id}")
 async def update_agent(
     agent_id: int,
-    request: UpdateAgentRequest,
+    agent_name: str = Form(None),
+    phone_number: str = Form(None),
+    system_prompt: str = Form(None),
+    voice_type: str = Form(None),
+    language: str = Form(None),
+    industry: str = Form(None),
+    owner_name: str = Form(None),
+    avatar: UploadFile = File(None),  # Optional new image
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Update agent details.
+    Update agent details with optional new avatar.
     Only the agent owner can update.
     """
     try:
         user_id = current_user["id"]
         
-        # Build updates dict (only include provided fields)
+        # Get existing agent
+        existing_agent = db.get_agent_by_id(agent_id)
+        if not existing_agent or existing_agent["admin_id"] != user_id:
+            return error_response("Agent not found or unauthorized", 404)
+        
+        # Build updates dict
         updates = {}
-        if request.agent_name is not None:
-            updates["agent_name"] = request.agent_name
-        if request.phone_number is not None:
-            updates["phone_number"] = request.phone_number
-        if request.system_prompt is not None:
-            updates["system_prompt"] = request.system_prompt
-        if request.voice_type is not None:
-            updates["voice_type"] = request.voice_type
-        if request.language is not None:
-            updates["language"] = request.language
-        if request.industry is not None:
-            updates["industry"] = request.industry
-        if request.owner_name is not None:  # ← ADD THIS LINE
-            updates["owner_name"] = request.owner_name  # ← ADD THIS LINE
+        if agent_name is not None:
+            updates["agent_name"] = agent_name
+        if phone_number is not None:
+            updates["phone_number"] = phone_number
+        if system_prompt is not None:
+            updates["system_prompt"] = system_prompt
+        if voice_type is not None:
+            updates["voice_type"] = voice_type
+        if language is not None:
+            updates["language"] = language
+        if industry is not None:
+            updates["industry"] = industry
+        if owner_name is not None:
+            updates["owner_name"] = owner_name
+        
+        # Handle avatar upload
+        if avatar and avatar.filename:
+            # Validate file type
+            allowed_extensions = {'jpg', 'jpeg', 'png', 'gif', 'webp'}
+            file_extension = avatar.filename.split('.')[-1].lower()
+            
+            if file_extension not in allowed_extensions:
+                return error_response(
+                    f"Invalid file type. Allowed: {', '.join(allowed_extensions)}", 
+                    400
+                )
+            
+            # Validate file size
+            content = await avatar.read()
+            if len(content) > 5 * 1024 * 1024:
+                return error_response("File too large. Maximum size: 5MB", 400)
+            
+            # Upload new avatar
+            try:
+                new_avatar_url = r2_storage.upload_avatar(content, file_extension)
+                
+                # Delete old avatar if exists
+                old_avatar_url = existing_agent.get("avatar_url")
+                if old_avatar_url:
+                    r2_storage.delete_avatar(old_avatar_url)
+                
+                updates["avatar_url"] = new_avatar_url
+                logging.info(f" Avatar updated: {new_avatar_url}")
+                
+            except Exception as e:
+                logging.error(f" Avatar upload failed: {e}")
+                return error_response("Failed to upload avatar", 500)
         
         if not updates:
             return error_response("No fields to update", 400)
         
+        # Update agent
         result = db.update_agent_with_voice_type(agent_id, user_id, updates)
         
         if not result:
-            return error_response("Agent not found or unauthorized", 404)
+            return error_response("Update failed", 500)
         
         return JSONResponse(
             status_code=200,
@@ -849,10 +916,12 @@ async def update_agent(
                 "data": result
             }
         )
+        
     except ValueError as e:
         return error_response(str(e), 400)
     except Exception as e:
         logging.error(f"Error updating agent: {e}")
+        traceback.print_exc()
         return error_response("Failed to update agent", 500)
 
 
@@ -862,15 +931,31 @@ async def delete_agent(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Delete (deactivate) an agent.
+    Delete (deactivate) an agent and optionally delete avatar.
     Only the agent owner can delete.
     """
     try:
         user_id = current_user["id"]
+        
+        # Get agent details to find avatar URL
+        agent = db.get_agent_by_id(agent_id)
+        if not agent or agent["admin_id"] != user_id:
+            return error_response("Agent not found or unauthorized", 404)
+        
+        # Delete from database (soft delete)
         success = db.delete_agent(agent_id, user_id)
         
         if not success:
-            return error_response("Agent not found or unauthorized", 404)
+            return error_response("Delete failed", 500)
+        
+        # Delete avatar from R2 if exists
+        avatar_url = agent.get("avatar_url")
+        if avatar_url:
+            try:
+                r2_storage.delete_avatar(avatar_url)
+                logging.info(f" Avatar deleted for agent {agent_id}")
+            except Exception as e:
+                logging.warning(f"⚠️ Could not delete avatar: {e}")
         
         return JSONResponse(
             status_code=200,
@@ -879,9 +964,11 @@ async def delete_agent(
                 "message": "Agent deleted successfully"
             }
         )
+        
     except Exception as e:
         logging.error(f"Error deleting agent: {e}")
-        return error_response("Failed to delete agent", 500)
+        traceback.print_exc()
+        return error_response("Failed to delete agent", 500) 
 
 
 # # ============================================
@@ -1024,22 +1111,22 @@ async def livekit_webhook(request: Request):
         room = data.get("room", {})
         call_id = room.get("name")
 
-        # ✅ Extract call_id from egress events
+        #  Extract call_id from egress events
         if not call_id:
             egress_info = data.get("egress_info", {}) or data.get("egressInfo", {})
             call_id = egress_info.get("room_name") or egress_info.get("roomName")
             if not call_id:
                 return JSONResponse({"message": "No call_id"})
 
-        # ✅ Always log event
+        #  Always log event
         add_call_event(call_id, event, data)
         
-        # ✅ Ignore non-critical events
+        #  Ignore non-critical events
         if event in ["room_started", "participant_joined", "egress_started", 
                      "egress_updated", "track_published", "track_unpublished"]:
             return JSONResponse({"message": f"{event} logged"})
 
-        # ✅ Handle room end
+        #  Handle room end
         if event in ["room_finished", "participant_left"]:
             await asyncio.sleep(0.5)
             
@@ -1052,14 +1139,14 @@ async def livekit_webhook(request: Request):
                     """, (call_id,))
                     row = cursor.fetchone()
             finally:
-                db.release_connection(conn)  # ✅ FIXED: Changed from conn.close()
+                db.release_connection(conn)  #  FIXED: Changed from conn.close()
 
             if not row:
                 return JSONResponse({"message": "Call not found"})
 
             current_status, events_log, db_started_at, created_at = row
             
-            # ✅ Skip if already final
+            #  Skip if already final
             if current_status in {"completed", "unanswered"}:
                 # Just update duration
                 started = db_started_at or created_at
@@ -1072,7 +1159,7 @@ async def livekit_webhook(request: Request):
                 })
                 return JSONResponse({"message": "Duration updated"})
 
-            # ✅ Determine final status
+            #  Determine final status
             answered = check_if_answered(events_log)
             final_status = "completed" if answered else "unanswered"
             
@@ -1089,7 +1176,6 @@ async def livekit_webhook(request: Request):
             
             return JSONResponse({"message": f"Call ended: {final_status}"})
 
-        # ✅ Handle recording
         elif event == "egress_ended":
             egress_info = data.get("egress_info", {}) or data.get("egressInfo", {})
             file_results = egress_info.get("file_results", []) or egress_info.get("fileResults", [])
@@ -1106,5 +1192,5 @@ async def livekit_webhook(request: Request):
 
     except Exception as e:
         logging.error(f"Webhook error: {e}")
-        traceback.print_exc()  # ✅ Added for better debugging
+        traceback.print_exc()  
         return JSONResponse({"error": str(e)}, status_code=500)

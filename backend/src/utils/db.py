@@ -49,7 +49,7 @@ class PGDB:
     # ==================== NEW: AGENTS TABLE ====================
     def create_agents_table(self):
         """
-        Create agents table with voice_type and owner_name.
+        Create agents table with voice_type, owner_name, and avatar_url.
         """
         conn = self.get_connection()
         try:
@@ -62,6 +62,7 @@ class PGDB:
                         system_prompt TEXT NOT NULL,
                         voice_type VARCHAR(20) DEFAULT 'female',
                         owner_name VARCHAR(100),
+                        avatar_url TEXT,
                         language VARCHAR(10) DEFAULT 'en',
                         industry VARCHAR(50),
                         admin_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -79,7 +80,7 @@ class PGDB:
                     ON agents(admin_id);
                 """)
             conn.commit()
-            logging.info("✅ agents table created")
+            logging.info("✅ agents table created with avatar_url")
         except Exception as e:
             logging.error(f"Error creating agents table: {e}")
         finally:
@@ -1012,10 +1013,46 @@ class PGDB:
             self.release_connection(conn)
 
 
+    def create_agent_with_voice_type(self, agent_data: dict):
+        """
+        Create agent with voice_type, owner_name, and avatar_url.
+        """
+        conn = self.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    INSERT INTO agents (
+                        phone_number, agent_name, system_prompt,
+                        voice_type, language, industry, owner_name, avatar_url, admin_id
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING *;
+                """, (
+                    agent_data["phone_number"],
+                    agent_data["agent_name"],
+                    agent_data["system_prompt"],
+                    agent_data.get("voice_type", "female"),
+                    agent_data.get("language", "en"),
+                    agent_data.get("industry"),
+                    agent_data.get("owner_name"),
+                    agent_data.get("avatar_url"),  # NEW
+                    agent_data["admin_id"]
+                ))
+                result = cursor.fetchone()
+            conn.commit()
+            logging.info(f"✅ Created agent {result['id']} with avatar")
+            return result
+        except Exception as e:
+            conn.rollback()
+            logging.error(f"Error creating agent: {e}")
+            raise
+        finally:
+            self.release_connection(conn)
+
+
     def update_agent_with_voice_type(self, agent_id: int, admin_id: int, updates: dict):
         """
-        Update agent with new schema (voice_type instead of voice_id/voice_name).
-        Ensures only the agent's owner can update.
+        Update agent including avatar_url.
         """
         if not updates:
             return None
@@ -1037,7 +1074,7 @@ class PGDB:
             
             allowed_fields = {
                 'agent_name', 'system_prompt', 'voice_type', 
-                'language', 'industry', 'phone_number', 'owner_name'  # ← ADD owner_name
+                'language', 'industry', 'phone_number', 'owner_name', 'avatar_url'
             }
             
             for key, value in updates.items():
@@ -1066,42 +1103,6 @@ class PGDB:
         except Exception as e:
             conn.rollback()
             logging.error(f"Error updating agent: {e}")
-            raise
-        finally:
-            self.release_connection(conn)
-
-
-    def create_agent_with_voice_type(self, agent_data: dict):
-        """
-        Create agent with voice_type and owner_name.
-        """
-        conn = self.get_connection()
-        try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    INSERT INTO agents (
-                        phone_number, agent_name, system_prompt,
-                        voice_type, language, industry, owner_name, admin_id
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING *;
-                """, (
-                    agent_data["phone_number"],
-                    agent_data["agent_name"],
-                    agent_data["system_prompt"],
-                    agent_data.get("voice_type", "female"),
-                    agent_data.get("language", "en"),
-                    agent_data.get("industry"),
-                    agent_data.get("owner_name"),
-                    agent_data["admin_id"]
-                ))
-                result = cursor.fetchone()
-            conn.commit()
-            logging.info(f"✅ Created agent {result['id']} for {result['phone_number']}")
-            return result
-        except Exception as e:
-            conn.rollback()
-            logging.error(f"Error creating agent: {e}")
             raise
         finally:
             self.release_connection(conn)
