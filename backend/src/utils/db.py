@@ -607,13 +607,14 @@ class PGDB:
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("""
-                    SELECT 
+                    SELECT
                         a.id,
                         a.phone_number,
                         a.agent_name,
-                        a.voice_name,
+                        a.voice_type,  # Corrected from voice_name
                         a.language,
                         a.industry,
+                        a.avatar_url,  
                         a.is_active,
                         a.created_at,
                         a.updated_at,
@@ -698,7 +699,7 @@ class PGDB:
         conn = self.get_connection()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                # Total agents
+                # Total agents (unchanged)
                 cursor.execute("""
                     SELECT COUNT(*) as total_agents
                     FROM agents
@@ -706,9 +707,9 @@ class PGDB:
                 """, (admin_id,))
                 agents_count = cursor.fetchone()["total_agents"]
                 
-                # Call statistics
+                # Call statistics (unchanged)
                 cursor.execute("""
-                    SELECT 
+                    SELECT
                         COUNT(ch.*) as total_calls,
                         COUNT(CASE WHEN ch.status = 'completed' THEN 1 END) as completed_calls,
                         COUNT(CASE WHEN ch.status = 'unanswered' THEN 1 END) as unanswered_calls,
@@ -720,27 +721,28 @@ class PGDB:
                 """, (admin_id,))
                 call_stats = cursor.fetchone()
                 
-                # Calls per day (last 7 days)
+                # Daily calls (unchanged)
                 cursor.execute("""
-                    SELECT 
+                    SELECT
                         DATE(ch.created_at) as call_date,
                         COUNT(*) as call_count,
                         COUNT(CASE WHEN ch.status = 'completed' THEN 1 END) as completed_count
                     FROM call_history ch
                     JOIN agents a ON ch.agent_id = a.id
-                    WHERE a.admin_id = %s 
+                    WHERE a.admin_id = %s
                         AND ch.created_at >= CURRENT_DATE - INTERVAL '7 days'
                     GROUP BY DATE(ch.created_at)
                     ORDER BY call_date DESC
                 """, (admin_id,))
                 daily_calls = cursor.fetchall()
                 
-                # Top performing agents
+                # Top performing agents - ADDED a.avatar_url
                 cursor.execute("""
-                    SELECT 
+                    SELECT
                         a.id,
                         a.agent_name,
                         a.phone_number,
+                        a.avatar_url,  
                         COUNT(ch.id) as total_calls,
                         COUNT(CASE WHEN ch.status = 'completed' THEN 1 END) as completed_calls,
                         COALESCE(AVG(CASE WHEN ch.duration > 0 THEN ch.duration END), 0) as avg_duration
@@ -773,6 +775,7 @@ class PGDB:
                             "id": a["id"],
                             "name": a["agent_name"],
                             "phone": a["phone_number"],
+                            "avatar_url": a.get("avatar_url"),  # ADDED: Include in dict
                             "total_calls": a["total_calls"],
                             "completed_calls": a["completed_calls"],
                             "avg_duration": round(float(a["avg_duration"]), 1)
@@ -809,7 +812,7 @@ class PGDB:
                 
                 # Get agents with stats
                 cursor.execute("""
-                    SELECT 
+                    SELECT
                         a.id,
                         a.phone_number,
                         a.agent_name,
@@ -817,6 +820,7 @@ class PGDB:
                         a.voice_type,
                         a.language,
                         a.industry,
+                        a.avatar_url, 
                         a.is_active,
                         a.created_at,
                         a.updated_at,
@@ -872,7 +876,7 @@ class PGDB:
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("""
-                    SELECT 
+                    SELECT
                         a.id,
                         a.agent_name,
                         a.phone_number,
@@ -880,6 +884,7 @@ class PGDB:
                         a.language,
                         a.industry,
                         a.owner_name,
+                        a.avatar_url,  
                         COUNT(ch.id) as total_calls,
                         COUNT(CASE WHEN ch.status = 'completed' THEN 1 END) as completed_calls,
                         COUNT(CASE WHEN ch.status = 'unanswered' THEN 1 END) as unanswered_calls,
@@ -892,7 +897,6 @@ class PGDB:
                     ORDER BY total_calls DESC, completed_calls DESC
                     LIMIT %s
                 """, (admin_id, limit))
-
                 
                 agents = cursor.fetchall()
                 
@@ -1103,6 +1107,66 @@ class PGDB:
         except Exception as e:
             conn.rollback()
             logging.error(f"Error updating agent: {e}")
+            raise
+        finally:
+            self.release_connection(conn)
+
+
+
+    def get_agents_by_owner_name(self, admin_id: int, owner_name: str):
+        """
+        Get all agents for a specific admin filtered by owner name.
+        Case-insensitive partial match.
+        """
+        conn = self.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        a.id,
+                        a.phone_number,
+                        a.agent_name,
+                        a.system_prompt,
+                        a.voice_type,
+                        a.language,
+                        a.industry,
+                        a.owner_name,
+                        a.avatar_url,
+                        a.is_active,
+                        a.created_at,
+                        a.updated_at,
+                        COUNT(ch.id) as total_calls,
+                        COUNT(CASE WHEN ch.status = 'completed' THEN 1 END) as completed_calls,
+                        COUNT(CASE WHEN ch.status = 'unanswered' THEN 1 END) as unanswered_calls,
+                        COALESCE(AVG(CASE WHEN ch.duration > 0 THEN ch.duration END), 0) as avg_duration,
+                        COALESCE(SUM(ch.duration), 0) as total_duration,
+                        MAX(ch.created_at) as last_call_at
+                    FROM agents a
+                    LEFT JOIN call_history ch ON a.id = ch.agent_id
+                    WHERE a.admin_id = %s 
+                        AND a.is_active = TRUE
+                        AND LOWER(a.owner_name) LIKE LOWER(%s)
+                    GROUP BY a.id
+                    ORDER BY a.created_at DESC
+                """, (admin_id, f"%{owner_name}%"))
+                
+                agents = cursor.fetchall()
+                
+                # Format response
+                for agent in agents:
+                    agent["avg_duration"] = round(float(agent["avg_duration"]), 1)
+                    agent["total_duration"] = round(float(agent["total_duration"]), 1)
+                    if agent["created_at"]:
+                        agent["created_at"] = agent["created_at"].isoformat()
+                    if agent["updated_at"]:
+                        agent["updated_at"] = agent["updated_at"].isoformat()
+                    if agent["last_call_at"]:
+                        agent["last_call_at"] = agent["last_call_at"].isoformat()
+                
+                return agents
+                
+        except Exception as e:
+            logging.error(f"Error fetching agents by owner name: {e}")
             raise
         finally:
             self.release_connection(conn)

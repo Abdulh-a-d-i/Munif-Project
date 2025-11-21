@@ -37,8 +37,7 @@ from src.api.base_models import (
 from src.utils.db import PGDB 
 from src.utils.mail_management import Send_Mail
 from src.utils.jwt_utils import create_access_token
-from src.utils.utils import get_current_user, add_call_event, get_livekit_call_status, fetch_and_store_transcript, fetch_and_store_recording, calculate_duration, check_if_answered, r2_storage
-from livekit import api
+from src.utils.utils import get_current_user, add_call_event, calculate_duration, check_if_answered, r2_storage
 from fastapi import File, UploadFile, Form
 load_dotenv()
 
@@ -373,7 +372,7 @@ async def save_call_data(request: Request):
         if transcript_blob:
             async def delayed_transcript():
                 await asyncio.sleep(5)
-                logging.info(f"📄 Downloading transcript for {call_id}")
+                logging.info(f"?? Downloading transcript for {call_id}")
                 await fetch_and_store_transcript(call_id, None, transcript_blob)
             asyncio.create_task(delayed_transcript())
         
@@ -381,7 +380,7 @@ async def save_call_data(request: Request):
         if recording_blob:
             async def delayed_recording():
                 await asyncio.sleep(15)
-                logging.info(f"🎵 Downloading recording for {call_id}")
+                logging.info(f"?? Downloading recording for {call_id}")
                 await fetch_and_store_recording(call_id, None, recording_blob)
             asyncio.create_task(delayed_recording())
         
@@ -741,21 +740,11 @@ async def create_agent(
     language: str = Form("en"),
     industry: str = Form(None),
     owner_name: str = Form(None),
-    avatar: UploadFile = File(None),  # Optional image file
+    avatar: UploadFile = File(None),
     current_user: dict = Depends(get_current_user)
 ):
     """
     Create a new agent with optional avatar image.
-    
-    Form data:
-    - agent_name: Agent display name
-    - phone_number: Unique phone number
-    - system_prompt: AI system prompt
-    - voice_type: "male" or "female"
-    - language: Language code (default: "en")
-    - industry: Industry category (optional)
-    - owner_name: Owner name (optional)
-    - avatar: Image file (optional, jpg/png/gif/webp)
     """
     try:
         user_id = current_user["id"]
@@ -786,9 +775,9 @@ async def create_agent(
             # Upload to R2
             try:
                 avatar_url = r2_storage.upload_avatar(content, file_extension)
-                logging.info(f" Avatar uploaded: {avatar_url}")
+                logging.info(f"? Avatar uploaded: {avatar_url}")
             except Exception as e:
-                logging.error(f" Avatar upload failed: {e}")
+                logging.error(f"? Avatar upload failed: {e}")
                 return error_response("Failed to upload avatar", 500)
         
         # Create agent data
@@ -806,6 +795,12 @@ async def create_agent(
         
         # Save to database
         agent = db.create_agent_with_voice_type(agent_data)
+        
+        # ?? FIX: Convert datetime objects to ISO strings
+        if agent.get("created_at"):
+            agent["created_at"] = agent["created_at"].isoformat()
+        if agent.get("updated_at"):
+            agent["updated_at"] = agent["updated_at"].isoformat()
         
         return JSONResponse(
             status_code=201,
@@ -834,12 +829,11 @@ async def update_agent(
     language: str = Form(None),
     industry: str = Form(None),
     owner_name: str = Form(None),
-    avatar: UploadFile = File(None),  # Optional new image
+    avatar: UploadFile = File(None),
     current_user: dict = Depends(get_current_user)
 ):
     """
     Update agent details with optional new avatar.
-    Only the agent owner can update.
     """
     try:
         user_id = current_user["id"]
@@ -868,7 +862,6 @@ async def update_agent(
         
         # Handle avatar upload
         if avatar and avatar.filename:
-            # Validate file type
             allowed_extensions = {'jpg', 'jpeg', 'png', 'gif', 'webp'}
             file_extension = avatar.filename.split('.')[-1].lower()
             
@@ -878,12 +871,10 @@ async def update_agent(
                     400
                 )
             
-            # Validate file size
             content = await avatar.read()
             if len(content) > 5 * 1024 * 1024:
                 return error_response("File too large. Maximum size: 5MB", 400)
             
-            # Upload new avatar
             try:
                 new_avatar_url = r2_storage.upload_avatar(content, file_extension)
                 
@@ -893,10 +884,10 @@ async def update_agent(
                     r2_storage.delete_avatar(old_avatar_url)
                 
                 updates["avatar_url"] = new_avatar_url
-                logging.info(f" Avatar updated: {new_avatar_url}")
+                logging.info(f"? Avatar updated: {new_avatar_url}")
                 
             except Exception as e:
-                logging.error(f" Avatar upload failed: {e}")
+                logging.error(f"? Avatar upload failed: {e}")
                 return error_response("Failed to upload avatar", 500)
         
         if not updates:
@@ -907,6 +898,12 @@ async def update_agent(
         
         if not result:
             return error_response("Update failed", 500)
+        
+        # ?? FIX: Convert datetime objects to ISO strings
+        if result.get("created_at"):
+            result["created_at"] = result["created_at"].isoformat()
+        if result.get("updated_at"):
+            result["updated_at"] = result["updated_at"].isoformat()
         
         return JSONResponse(
             status_code=200,
@@ -923,6 +920,7 @@ async def update_agent(
         logging.error(f"Error updating agent: {e}")
         traceback.print_exc()
         return error_response("Failed to update agent", 500)
+    
 
 
 @router.delete("/agents/{agent_id}")
@@ -955,7 +953,7 @@ async def delete_agent(
                 r2_storage.delete_avatar(avatar_url)
                 logging.info(f" Avatar deleted for agent {agent_id}")
             except Exception as e:
-                logging.warning(f"⚠️ Could not delete avatar: {e}")
+                logging.warning(f"?? Could not delete avatar: {e}")
         
         return JSONResponse(
             status_code=200,
@@ -1194,3 +1192,47 @@ async def livekit_webhook(request: Request):
         logging.error(f"Webhook error: {e}")
         traceback.print_exc()  
         return JSONResponse({"error": str(e)}, status_code=500)
+    
+
+
+@router.get("/agents/by-owner/{owner_name}")
+async def get_agents_by_owner(
+    owner_name: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get all agents for the logged-in admin filtered by owner name.
+    
+    Parameters:
+    - owner_name: Owner name to search for (case-insensitive, partial match)
+    
+    Returns:
+    - List of agents with call statistics
+    
+    Example:
+    GET /api/agents/by-owner/John
+    """
+    try:
+        user_id = current_user["id"]
+        
+        # Validate owner_name
+        if not owner_name or len(owner_name.strip()) == 0:
+            return error_response("Owner name cannot be empty", 400)
+        
+        # Get agents
+        agents = db.get_agents_by_owner_name(user_id, owner_name.strip())
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "owner_name": owner_name,
+                "count": len(agents),
+                "data": agents
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f"Error fetching agents by owner: {e}")
+        traceback.print_exc()
+        return error_response("Failed to fetch agents by owner", 500)
