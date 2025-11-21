@@ -12,10 +12,6 @@ import traceback
 from datetime import datetime, timezone  
 from livekit import api
 
-from google.cloud import storage
-from google.cloud.exceptions import NotFound
-from google.oauth2 import service_account
-
 from src.utils.db import PGDB
 
 db = PGDB()
@@ -25,17 +21,117 @@ auth_scheme = HTTPBearer()
 from fastapi.security import HTTPBearer,HTTPAuthorizationCredentials
 auth_scheme = HTTPBearer()
 
-def get_gcs_client():
-    """Initialize GCS client with service account"""
-    gcp_key_b64 = os.getenv("GCS_SERVICE_ACCOUNT_KEY") or os.getenv("GCP_SERVICE_ACCOUNT_KEY_BASE64")
-    if not gcp_key_b64:
-        raise RuntimeError("GCS_SERVICE_ACCOUNT_KEY not set")
-    
-    decoded = base64.b64decode(gcp_key_b64).decode("utf-8")
-    key_json = json.loads(decoded)
-    credentials = service_account.Credentials.from_service_account_info(key_json)
-    return storage.Client(credentials=credentials, project=key_json.get("project_id"))
+import boto3
+from botocore.exceptions import ClientError
 
+def get_s3_client():
+    """Initialize S3-compatible client for Hetzner Object Storage"""
+    endpoint = os.getenv("HETZNER_ENDPOINT_URL")
+    access_key = os.getenv("HETZNER_ACCESS_KEY")
+    secret_key = os.getenv("HETZNER_SECRET_KEY")
+    
+    if not all([endpoint, access_key, secret_key]):
+        raise RuntimeError("Missing Hetzner credentials")
+    
+    return boto3.client(
+        's3',
+        endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=os.getenv("HETZNER_REGION", "hel1")
+    )
+
+# Update _fetch_from_gcs_blob function
+async def _fetch_from_s3_blob(blob_name: str) -> bytes:
+    """Download file from Hetzner using blob name"""
+    try:
+        s3_client = get_s3_client()
+        bucket_name = os.getenv("HETZNER_BUCKET_NAME")
+        
+        response = s3_client.get_object(Bucket=bucket_name, Key=blob_name)
+        data = response['Body'].read()
+        
+        logging.info(f"✅ Downloaded {len(data)} bytes from Hetzner: {blob_name}")
+        return data
+            
+    except ClientError as e:
+        logging.error(f"❌ S3 download failed for {blob_name}: {e}")
+        traceback.print_exc()
+        return None
+
+# Update fetch_and_store_transcript function
+async def fetch_and_store_transcript(call_id: str, transcript_url: str = None, transcript_blob: str = None):
+    """Download transcript from Hetzner blob"""
+    try:
+        transcript_data = None
+        
+        if transcript_blob:
+            logging.info(f"📥 Downloading transcript from blob: {transcript_blob}")
+            try:
+                s3_client = get_s3_client()
+                bucket_name = os.getenv("HETZNER_BUCKET_NAME")
+                
+                response = s3_client.get_object(Bucket=bucket_name, Key=transcript_blob)
+                transcript_json = response['Body'].read().decode('utf-8')
+                transcript_data = json.loads(transcript_json)
+                logging.info(f"✅ Downloaded transcript from blob")
+                
+            except ClientError as e:
+                logging.error(f"❌ Blob download failed: {e}")
+                traceback.print_exc()
+                return None
+        else:
+            logging.warning(f"⚠️ No transcript_blob provided for {call_id}")
+            return None
+        
+        # Rest of function remains same...
+        if transcript_data:
+            has_content = False
+            if isinstance(transcript_data, dict):
+                items = transcript_data.get("items") or transcript_data.get("messages") or []
+                has_content = len(items) > 0
+            elif isinstance(transcript_data, list):
+                has_content = len(transcript_data) > 0
+            
+            if has_content:
+                db.update_call_history(call_id, {"transcript": transcript_data})
+                logging.info(f"✅ Transcript stored ({len(str(transcript_data))} chars)")
+            else:
+                logging.warning(f"⚠️ Empty transcript for {call_id}")
+                db.update_call_history(call_id, {"transcript": {"items": [], "note": "No conversation"}})
+            
+            return transcript_data
+        
+        return None
+        
+    except Exception as e:
+        logging.error(f"❌ Error fetching transcript: {e}")
+        traceback.print_exc()
+        return None
+
+# Update fetch_and_store_recording function
+async def fetch_and_store_recording(call_id: str, recording_url: str = None, recording_blob_name: str = None):
+    """
+    Recording is already in Hetzner - we just store the blob path.
+    NO DOWNLOAD NEEDED!
+    """
+    try:
+        logging.info(f"🎵 Recording path already stored: {recording_blob_name}")
+        
+        # Path is already in DB from agent upload
+        # We only verify it exists
+        if recording_blob_name:
+            s3_client = get_s3_client()
+            bucket_name = os.getenv("HETZNER_BUCKET_NAME")
+            
+            try:
+                s3_client.head_object(Bucket=bucket_name, Key=recording_blob_name)
+                logging.info(f"✅ Recording exists in Hetzner: {recording_blob_name}")
+            except ClientError:
+                logging.warning(f"⚠️ Recording not found in bucket: {recording_blob_name}")
+        
+    except Exception as e:
+        logging.error(f"❌ Error verifying recording: {e}")
 
 def get_current_user(token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
     # Token decode step
@@ -192,129 +288,8 @@ async def get_livekit_call_status(call_id: str):
 
 import traceback
 
-async def fetch_and_store_transcript(call_id: str, transcript_url: str = None, transcript_blob: str = None):
-    """
-    Download transcript from GCS blob ONLY (never use signed URLs).
-    Signed URLs cause timeouts and ReadErrors.
-    """
-    try:
-        transcript_data = None
-        
-        # ✅ ONLY use GCS blob (direct access with service account)
-        if transcript_blob:
-            logging.info(f"📥 Downloading transcript from blob: {transcript_blob}")
-            try:
-                gcs = get_gcs_client()
-                bucket_name = os.getenv("GOOGLE_BUCKET_NAME")
-                bucket = gcs.bucket(bucket_name)
-                blob = bucket.blob(transcript_blob)
-                
-                if blob.exists():
-                    transcript_json = blob.download_as_text()
-                    transcript_data = json.loads(transcript_json)
-                    logging.info(f"✅ Downloaded transcript from blob")
-                else:
-                    logging.error(f"❌ Blob not found: {transcript_blob}")
-            except Exception as e:
-                logging.error(f"❌ Blob download failed: {e}")
-                traceback.print_exc()
-                return None
-        else:
-            logging.warning(f"⚠️ No transcript_blob provided for {call_id}")
-            return None
-        
-        # Store in database
-        if transcript_data:
-            # Check if has content
-            has_content = False
-            if isinstance(transcript_data, dict):
-                items = transcript_data.get("items") or transcript_data.get("messages") or []
-                has_content = len(items) > 0
-            elif isinstance(transcript_data, list):
-                has_content = len(transcript_data) > 0
-            
-            if has_content:
-                db.update_call_history(call_id, {"transcript": transcript_data})
-                logging.info(f"✅ Transcript stored ({len(str(transcript_data))} chars)")
-            else:
-                logging.warning(f"⚠️ Empty transcript for {call_id}")
-                db.update_call_history(call_id, {"transcript": {"items": [], "note": "No conversation"}})
-            
-            return transcript_data
-        
-        logging.warning(f"⚠️ No transcript data for {call_id}")
-        return None
-        
-    except Exception as e:
-        logging.error(f"❌ Error fetching transcript: {e}")
-        traceback.print_exc()
-        return None
 
 
-async def fetch_and_store_recording(call_id: str, recording_url: str = None, recording_blob_name: str = None):
-    """Download recording and store BYTES in database"""
-    try:
-        logging.info(f"🎵 Fetching recording for call {call_id}")
-        
-        # Get blob name from DB if not provided
-        if not recording_blob_name:
-            conn = db.get_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("""
-                        SELECT recording_blob
-                        FROM call_history
-                        WHERE call_id = %s
-                    """, (call_id,))
-                    row = cursor.fetchone()
-                    if row:
-                        recording_blob_name = row[0]
-            finally:
-                db.release_connection(conn)
-        
-        if not recording_blob_name:
-            logging.warning(f"⚠️ No recording blob for {call_id}")
-            return
-        
-        # ✅ Download from GCS blob ONLY
-        recording_data = await _fetch_from_gcs_blob(recording_blob_name)
-        
-        if recording_data:
-            # ✅ Store in database
-            db.store_recording_blob(
-                call_id=call_id,
-                recording_data=recording_data,
-                content_type="audio/ogg"
-            )
-            logging.info(f"✅ Stored {len(recording_data)} bytes for {call_id}")
-        else:
-            logging.error(f"❌ Failed to download recording for {call_id}")
-            
-    except Exception as e:
-        logging.error(f"❌ Error fetching recording: {e}")
-        traceback.print_exc()
-
-
-async def _fetch_from_gcs_blob(blob_name: str) -> bytes:
-    """Download file from GCS using blob name"""
-    try:
-        gcs = get_gcs_client()  # ← This already handles base64 decoding
-        bucket_name = os.getenv("GOOGLE_BUCKET_NAME")
-        bucket = gcs.bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-        
-        if blob.exists():
-            data = blob.download_as_bytes()
-            logging.info(f"✅ Downloaded {len(data)} bytes from GCS: {blob_name}")
-            return data
-        else:
-            logging.error(f"❌ Blob not found in GCS: {blob_name}")
-            return None
-            
-    except Exception as e:
-        logging.error(f"❌ GCS download failed for {blob_name}: {e}")
-        traceback.print_exc()
-        return None
 
 async def _fetch_from_url(url: str) -> bytes:
     """
@@ -440,7 +415,33 @@ def check_if_answered(events_log) -> bool:
         return False
     
 
-
+def generate_presigned_url(blob_path: str, expiration: int = 3600) -> str:
+    """
+    Generate presigned URL for Hetzner object.
+    
+    Args:
+        blob_path: Object key in bucket (e.g., "avatars/abc.jpg")
+        expiration: URL validity in seconds (default 1 hour)
+    
+    Returns:
+        Presigned URL string
+    """
+    try:
+        s3_client = get_s3_client()
+        bucket_name = os.getenv("HETZNER_BUCKET_NAME")
+        
+        url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket_name, 'Key': blob_path},
+            ExpiresIn=expiration
+        )
+        
+        logging.info(f"✅ Generated presigned URL (expires in {expiration}s): {blob_path}")
+        return url
+        
+    except Exception as e:
+        logging.error(f"❌ Failed to generate presigned URL: {e}")
+        return None
 
 
 import os
@@ -452,47 +453,26 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-class CloudflareR2Storage:
+class HetznerAvatarStorage:
     """
-    Cloudflare R2 Storage Handler (S3-compatible)
+    Hetzner Object Storage Handler for Avatars
+    Stores only the object key, generates presigned URLs on-demand
     """
     def __init__(self):
-        self.account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID")
-        self.access_key_id = os.getenv("CLOUDFLARE_ACCESS_KEY_ID")
-        self.secret_access_key = os.getenv("CLOUDFLARE_SECRET_ACCESS_KEY")
-        self.bucket_name = os.getenv("CLOUDFLARE_BUCKET_NAME")
-        self.public_url = os.getenv("CLOUDFLARE_PUBLIC_URL")  
-        
-        if not all([self.account_id, self.access_key_id, self.secret_access_key, self.bucket_name]):
-            raise ValueError("Missing Cloudflare R2 credentials in .env")
-        
-        # Initialize S3 client for R2
-        self.s3_client = boto3.client(
-            's3',
-            endpoint_url=f'https://{self.account_id}.r2.cloudflarestorage.com',
-            aws_access_key_id=self.access_key_id,
-            aws_secret_access_key=self.secret_access_key,
-            region_name='auto'  # R2 uses 'auto'
-        )
-        
-        logging.info(f"✅ Cloudflare R2 initialized: {self.bucket_name}")
+        self.bucket_name = os.getenv("HETZNER_BUCKET_NAME")
+        self.s3_client = get_s3_client()
+        logging.info(f"✅ Hetzner Avatar Storage initialized: {self.bucket_name}")
     
     def upload_avatar(self, file_content: bytes, file_extension: str) -> str:
         """
-        Upload agent avatar to R2 bucket.
-        
-        Args:
-            file_content: Binary image data
-            file_extension: File extension (jpg, png, etc.)
+        Upload avatar and return the object key (NOT the URL).
         
         Returns:
-            Public URL of uploaded image
+            Object key (e.g., "avatars/uuid.jpg")
         """
         try:
-            # Generate unique filename
             filename = f"avatars/{uuid.uuid4()}.{file_extension}"
             
-            # Determine content type
             content_type_map = {
                 'jpg': 'image/jpeg',
                 'jpeg': 'image/jpeg',
@@ -502,70 +482,38 @@ class CloudflareR2Storage:
             }
             content_type = content_type_map.get(file_extension.lower(), 'application/octet-stream')
             
-            # Upload to R2
             self.s3_client.put_object(
                 Bucket=self.bucket_name,
                 Key=filename,
                 Body=file_content,
                 ContentType=content_type,
-                CacheControl='public, max-age=31536000'  # Cache for 1 year
+                CacheControl='public, max-age=31536000'
             )
             
-            # Generate public URL
-            if self.public_url:
-                public_url = f"{self.public_url}/{filename}"
-            else:
-                # Fallback to account-based URL
-                public_url = f"https://{self.account_id}.r2.cloudflarestorage.com/{self.bucket_name}/{filename}"
+            logging.info(f"✅ Uploaded avatar: {filename}")
+            return filename  # Return KEY, not URL
             
-            logging.info(f"✅ Uploaded avatar: {public_url}")
-            return public_url
-            
-        except ClientError as e:
-            logging.error(f"❌ R2 upload failed: {e}")
-            raise
         except Exception as e:
-            logging.error(f"❌ Upload error: {e}")
+            logging.error(f"❌ Avatar upload failed: {e}")
             raise
     
-    def delete_avatar(self, file_url: str) -> bool:
+    def delete_avatar(self, object_key: str) -> bool:
         """
-        Delete avatar from R2 bucket.
+        Delete avatar from bucket.
         
         Args:
-            file_url: Full URL of the file to delete
-        
-        Returns:
-            True if successful, False otherwise
+            object_key: Object key (e.g., "avatars/uuid.jpg")
         """
         try:
-            # Extract key from URL
-            if self.public_url in file_url:
-                key = file_url.replace(f"{self.public_url}/", "")
-            else:
-                # Extract from account URL
-                parts = file_url.split(f"{self.bucket_name}/")
-                if len(parts) == 2:
-                    key = parts[1]
-                else:
-                    logging.warning(f"Could not parse URL: {file_url}")
-                    return False
-            
             self.s3_client.delete_object(
                 Bucket=self.bucket_name,
-                Key=key
+                Key=object_key
             )
-            
-            logging.info(f"✅ Deleted avatar: {key}")
+            logging.info(f"✅ Deleted avatar: {object_key}")
             return True
-            
-        except ClientError as e:
-            logging.error(f"❌ R2 delete failed: {e}")
-            return False
         except Exception as e:
-            logging.error(f"❌ Delete error: {e}")
+            logging.error(f"❌ Delete failed: {e}")
             return False
 
-
-# Singleton instance
-r2_storage = CloudflareR2Storage()
+# Replace singleton
+hetzner_storage = HetznerAvatarStorage()  

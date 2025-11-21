@@ -6,12 +6,19 @@ from email.mime.base import MIMEBase
 from email import encoders
 from datetime import datetime
 import pytz
+from dotenv import load_dotenv
+import os
+load_dotenv()
+
+MAIL_SENDER =os.getenv("MAIL_SENDER")
+MAIL_Password =os.getenv("MAIL_Password")
+
+
 
 class Send_Mail:
     def __init__(self):
-        self.MAIL_SENDER = "imabdul.hadi1234@gmail.com"
-        self.EMAIL_PASSWORD = "gqty jnji ufjq rgrh"
-        self.TIMEZONE = "America/New_York"
+        self.MAIL_SENDER = MAIL_SENDER
+        self.EMAIL_PASSWORD = MAIL_Password
 
     async def send_email_with_calendar_event(
         self,

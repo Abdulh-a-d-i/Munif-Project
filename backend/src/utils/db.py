@@ -36,7 +36,6 @@ class PGDB:
         self.create_users_table()
         self.create_agents_table()  # NEW: Agents table
         self.create_call_history_table()
-        self.update_call_history_for_recordings()
 
     def get_connection(self):
         """Get connection from pool"""
@@ -293,31 +292,33 @@ class PGDB:
         finally:
             self.release_connection(conn)
 
-    def update_call_history_for_recordings(self):
-        """Add recording_blob_data column to store actual recording bytes"""
-        conn = self.get_connection()
+    def generate_presigned_url(blob_path: str, expiration: int = 3600) -> str:
+        """
+        Generate presigned URL for Hetzner object.
+        
+        Args:
+            blob_path: Object key in bucket (e.g., "avatars/abc.jpg")
+            expiration: URL validity in seconds (default 1 hour)
+        
+        Returns:
+            Presigned URL string
+        """
         try:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT column_name 
-                    FROM information_schema.columns 
-                    WHERE table_name='call_history' 
-                    AND column_name='recording_blob_data';
-                """)
-                
-                if not cursor.fetchone():
-                    cursor.execute("""
-                        ALTER TABLE call_history 
-                        ADD COLUMN recording_blob_data BYTEA NULL,
-                        ADD COLUMN recording_size INTEGER NULL,
-                        ADD COLUMN recording_content_type VARCHAR(100) DEFAULT 'audio/ogg';
-                    """)
-                    logging.info("✅ Added recording_blob_data column")
-            conn.commit()
+            s3_client = get_s3_client()
+            bucket_name = os.getenv("HETZNER_BUCKET_NAME")
+            
+            url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': bucket_name, 'Key': blob_path},
+                ExpiresIn=expiration
+            )
+            
+            logging.info(f"✅ Generated presigned URL (expires in {expiration}s): {blob_path}")
+            return url
+            
         except Exception as e:
-            logging.error(f"Error updating call_history for recordings: {e}")
-        finally:
-            self.release_connection(conn)
+            logging.error(f"❌ Failed to generate presigned URL: {e}")
+            return None
 
     def insert_call_history(
         self,
@@ -503,54 +504,54 @@ class PGDB:
         finally:
             self.release_connection(conn)
 
-    def store_recording_blob(self, call_id: str, recording_data: bytes, content_type: str = "audio/ogg"):
-        """Store actual recording bytes"""
-        conn = self.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    UPDATE call_history
-                    SET recording_blob_data = %s,
-                        recording_size = %s,
-                        recording_content_type = %s
-                    WHERE call_id = %s;
-                """, (psycopg2.Binary(recording_data), len(recording_data), content_type, call_id))
-            conn.commit()
-            logging.info(f"✅ Stored {len(recording_data)} bytes for {call_id}")
-        except Exception as e:
-            conn.rollback()
-            logging.error(f"Error storing recording: {e}")
-            raise
-        finally:
-            self.release_connection(conn)
+    # def store_recording_blob(self, call_id: str, recording_data: bytes, content_type: str = "audio/ogg"):
+    #     """Store actual recording bytes"""
+    #     conn = self.get_connection()
+    #     try:
+    #         with conn.cursor() as cursor:
+    #             cursor.execute("""
+    #                 UPDATE call_history
+    #                 SET recording_blob_data = %s,
+    #                     recording_size = %s,
+    #                     recording_content_type = %s
+    #                 WHERE call_id = %s;
+    #             """, (psycopg2.Binary(recording_data), len(recording_data), content_type, call_id))
+    #         conn.commit()
+    #         logging.info(f"✅ Stored {len(recording_data)} bytes for {call_id}")
+    #     except Exception as e:
+    #         conn.rollback()
+    #         logging.error(f"Error storing recording: {e}")
+    #         raise
+    #     finally:
+    #         self.release_connection(conn)
 
-    def get_recording_blob(self, call_id: str, agent_id: int = None):
-        """Retrieve recording bytes from database"""
-        conn = self.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                if agent_id is not None:
-                    cursor.execute("""
-                        SELECT recording_blob_data, recording_content_type, recording_size
-                        FROM call_history
-                        WHERE call_id = %s AND agent_id = %s;
-                    """, (call_id, agent_id))
-                else:
-                    cursor.execute("""
-                        SELECT recording_blob_data, recording_content_type, recording_size
-                        FROM call_history
-                        WHERE call_id = %s;
-                    """, (call_id,))
+    # def get_recording_blob(self, call_id: str, agent_id: int = None):
+    #     """Retrieve recording bytes from database"""
+    #     conn = self.get_connection()
+    #     try:
+    #         with conn.cursor() as cursor:
+    #             if agent_id is not None:
+    #                 cursor.execute("""
+    #                     SELECT recording_blob_data, recording_content_type, recording_size
+    #                     FROM call_history
+    #                     WHERE call_id = %s AND agent_id = %s;
+    #                 """, (call_id, agent_id))
+    #             else:
+    #                 cursor.execute("""
+    #                     SELECT recording_blob_data, recording_content_type, recording_size
+    #                     FROM call_history
+    #                     WHERE call_id = %s;
+    #                 """, (call_id,))
                 
-                row = cursor.fetchone()
-                if row and row[0]:
-                    return row[0], row[1], row[2]
-                return None, None, None
-        except Exception as e:
-            logging.error(f"❌ Error retrieving recording blob: {e}")
-            return None, None, None
-        finally:
-            self.release_connection(conn)
+    #             row = cursor.fetchone()
+    #             if row and row[0]:
+    #                 return row[0], row[1], row[2]
+    #             return None, None, None
+    #     except Exception as e:
+    #         logging.error(f"❌ Error retrieving recording blob: {e}")
+    #         return None, None, None
+    #     finally:
+    #         self.release_connection(conn)
 
     def get_call_by_id(self, call_id: str, agent_id: int = None):
         """Get a specific call by ID"""
@@ -1167,6 +1168,38 @@ class PGDB:
                 
         except Exception as e:
             logging.error(f"Error fetching agents by owner name: {e}")
+            raise
+        finally:
+            self.release_connection(conn)
+
+
+    def update_user_password(self, email: str, new_password: str):
+        """Update user password by email"""
+        conn = self.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                # Check if user exists
+                cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
+                if not cursor.fetchone():
+                    raise ValueError("User not found")
+                
+                # Hash new password
+                hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+                
+                # Update password
+                cursor.execute("""
+                    UPDATE users 
+                    SET password_hash = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE email = %s
+                    RETURNING id;
+                """, (hashed_password.decode('utf-8'), email))
+                
+                conn.commit()
+                logging.info(f"✅ Password updated for {email}")
+                return True
+        except Exception as e:
+            conn.rollback()
+            logging.error(f"Error updating password: {e}")
             raise
         finally:
             self.release_connection(conn)

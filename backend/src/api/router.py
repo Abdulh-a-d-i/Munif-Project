@@ -16,10 +16,9 @@ from fastapi import (
     Request,
 )
 
-
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi import HTTPException, Response
 from rich import print
@@ -37,26 +36,72 @@ from src.api.base_models import (
 from src.utils.db import PGDB 
 from src.utils.mail_management import Send_Mail
 from src.utils.jwt_utils import create_access_token
-from src.utils.utils import get_current_user, add_call_event, get_livekit_call_status, fetch_and_store_transcript, fetch_and_store_recording, calculate_duration, check_if_answered, r2_storage
+from src.utils.utils import (
+    get_current_user, 
+    add_call_event, 
+    get_livekit_call_status, 
+    fetch_and_store_transcript, 
+    fetch_and_store_recording, 
+    calculate_duration, 
+    check_if_answered, 
+    hetzner_storage,
+    generate_presigned_url
+)
 from livekit import api
 from fastapi import File, UploadFile, Form
+
 load_dotenv()
 
 router = APIRouter()
 mail_obj = Send_Mail()
 db = PGDB()
 load_dotenv(override=True)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GCS_BUCKET_NAME = os.getenv("GOOGLE_BUCKET_NAME")
-GCS_SERVICE_ACCOUNT_KEY = os.getenv("GCS_SERVICE_ACCOUNT_KEY")  
 
-# Error response helper
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+HETZNER_BUCKET_NAME = os.getenv("HETZNER_BUCKET_NAME")
+
+# ==================== HELPER ====================
 def error_response(message, status_code=400):
     return JSONResponse(
         status_code=status_code,
         content={"error": message}
     )
 
+def add_presigned_urls_to_agent(agent: dict) -> dict:
+    """
+    Add presigned URLs to agent data (avatar).
+    Modifies agent dict in-place.
+    """
+    if agent.get("avatar_url"):
+        # avatar_url contains the OBJECT KEY, generate presigned URL
+        agent["avatar_presigned_url"] = generate_presigned_url(
+            agent["avatar_url"], 
+            expiration=86400  # 24 hours
+        )
+    return agent
+
+def add_presigned_urls_to_call(call: dict) -> dict:
+    """
+    Add presigned URLs to call data (recording, transcript).
+    Modifies call dict in-place.
+    """
+    # Recording presigned URL
+    if call.get("recording_blob"):
+        call["recording_presigned_url"] = generate_presigned_url(
+            call["recording_blob"],
+            expiration=3600  # 1 hour
+        )
+    
+    # Transcript presigned URL (if stored as blob)
+    if call.get("transcript_blob"):
+        call["transcript_presigned_url"] = generate_presigned_url(
+            call["transcript_blob"],
+            expiration=3600  # 1 hour
+        )
+    
+    return call
+
+# ==================== AUTH ENDPOINTS ====================
 @router.post("/register")
 def register_user(user: UserRegister):
     user_dict = user.dict()
@@ -97,6 +142,7 @@ def login_user(user: UserLogin):
         logging.error(f"Error during login: {str(e)}")
         return error_response(f"Internal server error: {str(e)}", status_code=500)
 
+# ==================== CALL STATUS ====================
 @router.get("/call-status/{call_id}")
 async def get_call_status(call_id: str):
     """Optimized status check with proper connection handling"""
@@ -169,7 +215,7 @@ async def get_call_status(call_id: str):
             status_code=500
         )
 
-# ==================== CALL HISTORY ENDPOINT ====================
+# ==================== CALL HISTORY ====================
 @router.get("/call-history")
 async def get_user_call_history(
     page: int = Query(1, ge=1),
@@ -178,7 +224,6 @@ async def get_user_call_history(
 ):
     """Get call history for all agents belonging to the logged-in admin"""
     try:
-        # Get call history for admin (all their agents' calls)
         history = db.get_call_history_by_admin(user["id"], page, page_size)
 
         calls = []
@@ -186,14 +231,9 @@ async def get_user_call_history(
             call_data = {**call}
             
             # Format timestamps
-            if call.get("created_at"):
-                call_data["created_at"] = call["created_at"].isoformat() if hasattr(call["created_at"], 'isoformat') else str(call["created_at"])
-            
-            if call.get("started_at"):
-                call_data["started_at"] = call["started_at"].isoformat() if hasattr(call["started_at"], 'isoformat') else str(call["started_at"])
-            
-            if call.get("ended_at"):
-                call_data["ended_at"] = call["ended_at"].isoformat() if hasattr(call["ended_at"], 'isoformat') else str(call["ended_at"])
+            for field in ["created_at", "started_at", "ended_at"]:
+                if call.get(field):
+                    call_data[field] = call[field].isoformat() if hasattr(call[field], 'isoformat') else str(call[field])
             
             # Calculate display duration if not available
             if not call_data.get("duration") and call.get("started_at") and call.get("ended_at"):
@@ -204,7 +244,7 @@ async def get_user_call_history(
                 except:
                     call_data["duration"] = 0
             
-            # Parse transcript
+            # Parse transcript from JSONB
             transcript_text = None
             if call.get("transcript"):
                 try:
@@ -223,11 +263,13 @@ async def get_user_call_history(
                     logging.warning(f"Transcript parse error for {call.get('id')}: {e}")
             
             call_data["transcript_text"] = transcript_text
-            call_data["has_recording"] = bool(call.get("recording_url") or call.get("recording_blob_data"))
+            call_data["has_recording"] = bool(call.get("recording_blob"))
+            
+            # 🔥 ADD PRESIGNED URLS
+            call_data = add_presigned_urls_to_call(call_data)
             
             calls.append(call_data)
 
-        # Build pagination block safely
         pagination = history.get("pagination") or {
             "page": history.get("page", page),
             "page_size": history.get("page_size", page_size),
@@ -265,11 +307,9 @@ async def receive_agent_event(request: Request):
         if status not in {"initialized", "dialing", "connected", "unanswered", "completed"}:
             return JSONResponse({"error": "Invalid status"}, status_code=400)
         
-        # Build updates
         updates = {"status": status}
         now = datetime.now(timezone.utc)
         
-        # Set started_at on connected
         if status == "connected":
             conn = db.get_connection()
             try:
@@ -295,14 +335,12 @@ async def receive_agent_event(request: Request):
         logging.error(f"report-event error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# ==================== AGENT DATA ENDPOINTS ====================
 @router.post("/agent/update-call-started")
 async def update_call_started(request: Request):
     """Update call with started_at timestamp and caller info"""
     try:
         data = await request.json()
         call_id = data.get("call_id")
-        agent_id = data.get("agent_id")
         caller_number = data.get("caller_number")
         started_at = data.get("started_at")
         
@@ -345,7 +383,18 @@ async def update_call_recording(request: Request):
 
 @router.post("/agent/save-call-data")
 async def save_call_data(request: Request):
-    """Save transcript and recording metadata after call ends"""
+    """
+    Save transcript and recording metadata after call ends.
+    
+    This receives:
+    - transcript_blob: Path in Hetzner bucket (e.g., "transcripts/xxx.json")
+    - recording_blob: Path in Hetzner bucket (e.g., "recordings/xxx.ogg")
+    
+    Backend will:
+    1. Store paths in DB immediately
+    2. Download transcript after 5s delay → Store JSONB in DB
+    3. Recording stays in Hetzner (access via presigned URL)
+    """
     try:
         data = await request.json()
         
@@ -355,7 +404,7 @@ async def save_call_data(request: Request):
         transcript_url = data.get("transcript_url")
         recording_url = data.get("recording_url")
         
-        # Save metadata
+        # Save metadata (paths only)
         updates = {}
         if transcript_blob:
             updates["transcript_blob"] = transcript_blob
@@ -369,7 +418,7 @@ async def save_call_data(request: Request):
         if updates:
             db.update_call_history(call_id, updates)
         
-        # DELAYED transcript (5s)
+        # DELAYED transcript download & DB storage (5s)
         if transcript_blob:
             async def delayed_transcript():
                 await asyncio.sleep(5)
@@ -377,20 +426,15 @@ async def save_call_data(request: Request):
                 await fetch_and_store_transcript(call_id, None, transcript_blob)
             asyncio.create_task(delayed_transcript())
         
-        # DELAYED recording (15s)
-        if recording_blob:
-            async def delayed_recording():
-                await asyncio.sleep(15)
-                logging.info(f"🎵 Downloading recording for {call_id}")
-                await fetch_and_store_recording(call_id, None, recording_blob)
-            asyncio.create_task(delayed_recording())
+        # Recording stays in Hetzner - no download needed!
+        # Frontend will use presigned URL to stream it
         
         return JSONResponse({"success": True})
     except Exception as e:
-        logging.error(f" save_call_data error: {e}")
+        logging.error(f"save_call_data error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# ==================== RECORDING STREAMING ====================
+# ==================== RECORDING & TRANSCRIPT ACCESS ====================
 @router.options("/calls/{call_id}/recording/stream")
 async def stream_call_recording_options(call_id: str):
     return Response(
@@ -409,73 +453,20 @@ async def stream_call_recording(
     user=Depends(get_current_user),
     request: Request = None
 ):
-    """Stream recording for any agent owned by the logged-in admin"""
-    try:
-        # Get recording blob (no agent_id filter - user owns all their agents)
-        recording_data, content_type, size = db.get_recording_blob(call_id, agent_id=None)
-        
-        if recording_data:
-            logging.info(f"Streaming {size} bytes for {call_id}")
-            
-            cors_headers = {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, OPTIONS",
-                "Access-Control-Allow-Headers": "Range, Content-Type, Authorization",
-                "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges",
-            }
-            
-            range_header = request.headers.get("range") if request else None
-            
-            if range_header:
-                try:
-                    range_match = range_header.replace("bytes=", "").split("-")
-                    start = int(range_match[0]) if range_match[0] else 0
-                    end = int(range_match[1]) if len(range_match) > 1 and range_match[1].strip() else size - 1
-                    
-                    start = max(0, start)
-                    end = min(end, size - 1)
-                    
-                    chunk = recording_data[start:end + 1]
-                    
-                    return Response(
-                        content=chunk,
-                        status_code=206,
-                        media_type=content_type or "audio/ogg",
-                        headers={
-                            **cors_headers,
-                            "Content-Range": f"bytes {start}-{end}/{size}",
-                            "Content-Length": str(len(chunk)),
-                            "Accept-Ranges": "bytes",
-                        }
-                    )
-                except Exception as e:
-                    logging.warning(f"Range parse failed: {e}")
-            
-            # Full file stream
-            return StreamingResponse(
-                io.BytesIO(recording_data),
-                media_type=content_type or "audio/ogg",
-                headers={
-                    **cors_headers,
-                    "Content-Length": str(size),
-                    "Accept-Ranges": "bytes",
-                }
-            )
-        
-        raise HTTPException(status_code=404, detail="Recording not found")
-    except Exception as e:
-        logging.error(f" Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/calls/{call_id}/transcript")
-async def get_call_transcript(call_id: str, user=Depends(get_current_user)):
-    """Get transcript for a specific call"""
+    """
+    Stream recording from Hetzner bucket using presigned URL redirect.
+    
+    Flow:
+    1. Get recording_blob path from DB
+    2. Generate presigned URL (valid 1 hour)
+    3. Redirect browser to presigned URL
+    """
     try:
         conn = db.get_connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute("""
-                    SELECT transcript
+                    SELECT recording_blob, agent_id
                     FROM call_history
                     WHERE call_id = %s
                 """, (call_id,))
@@ -484,21 +475,71 @@ async def get_call_transcript(call_id: str, user=Depends(get_current_user)):
             db.release_connection(conn)
         
         if not row or not row[0]:
-            raise HTTPException(status_code=404, detail="Transcript not found")
+            raise HTTPException(status_code=404, detail="Recording not found")
         
-        return JSONResponse({"transcript": row[0]})
+        recording_blob, agent_id = row
+        
+        # Verify ownership
+        agent = db.get_agent_by_id(agent_id)
+        if not agent or agent["admin_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # 🔥 Generate presigned URL (valid for 1 hour)
+        presigned_url = generate_presigned_url(recording_blob, expiration=3600)
+        
+        if not presigned_url:
+            raise HTTPException(status_code=500, detail="Failed to generate access URL")
+        
+        # Redirect to presigned URL
+        return RedirectResponse(url=presigned_url, status_code=302)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error streaming recording: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/calls/{call_id}/transcript")
+async def get_call_transcript(call_id: str, user=Depends(get_current_user)):
+    """
+    Get transcript for a specific call.
+    
+    Transcript is stored as JSONB in database (downloaded from Hetzner after call ends).
+    """
+    try:
+        conn = db.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT transcript, agent_id
+                    FROM call_history
+                    WHERE call_id = %s
+                """, (call_id,))
+                row = cursor.fetchone()
+        finally:
+            db.release_connection(conn)
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="Call not found")
+        
+        transcript, agent_id = row
+        
+        # Verify ownership
+        agent = db.get_agent_by_id(agent_id)
+        if not agent or agent["admin_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        if not transcript:
+            raise HTTPException(status_code=404, detail="Transcript not available yet")
+        
+        return JSONResponse({"transcript": transcript})
     except HTTPException:
         raise
     except Exception as e:
         logging.error(f"Error fetching transcript: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-
-
-# ==================== AGENT MANAGEMENT ENDPOINTS ====================
-
-
+# ==================== AGENT MANAGEMENT ====================
 @router.get("/agents/{agent_id}/calls")
 async def get_agent_call_history(
     agent_id: int,
@@ -508,7 +549,6 @@ async def get_agent_call_history(
 ):
     """Get call history for a specific agent"""
     try:
-        # Verify ownership
         agent = db.get_agent_by_id(agent_id)
         if not agent or agent["admin_id"] != user["id"]:
             raise HTTPException(status_code=403, detail="Access denied")
@@ -520,12 +560,9 @@ async def get_agent_call_history(
             call_data = {**call}
             
             # Format timestamps
-            if call.get("created_at"):
-                call_data["created_at"] = call["created_at"].isoformat()
-            if call.get("started_at"):
-                call_data["started_at"] = call["started_at"].isoformat()
-            if call.get("ended_at"):
-                call_data["ended_at"] = call["ended_at"].isoformat()
+            for field in ["created_at", "started_at", "ended_at"]:
+                if call.get(field):
+                    call_data[field] = call[field].isoformat()
             
             # Calculate duration if missing
             if not call_data.get("duration") and call.get("started_at") and call.get("ended_at"):
@@ -555,7 +592,10 @@ async def get_agent_call_history(
                     logging.warning(f"Transcript parse error: {e}")
             
             call_data["transcript_text"] = transcript_text
-            call_data["has_recording"] = bool(call.get("recording_url") or call.get("recording_blob_data"))
+            call_data["has_recording"] = bool(call.get("recording_blob"))
+            
+            # 🔥 ADD PRESIGNED URLS
+            call_data = add_presigned_urls_to_call(call_data)
             
             calls.append(call_data)
         
@@ -580,8 +620,6 @@ async def get_agent_call_history(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-
-
 @router.get("/agent/config/{phone_number}")
 async def get_agent_config(phone_number: str):
     """Fetch agent configuration by phone number"""
@@ -603,59 +641,39 @@ async def get_agent_config(phone_number: str):
 
 @router.get("/agent/new-call")
 async def new_call(phone_number: str = Query(...), call_id: str = Query(...)):
-    """Handle new call notification, insert call history, and return dynamic data based on industry"""
+    """Just insert call history - no dynamic data needed"""
     try:
         agent = db.get_agent_by_phone(phone_number)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         
-        # Insert initial call history row
+        # Just insert call history
         db.insert_call_history(
-            agent_id=agent["id"],
+            agent_id=agent["agent_id"],
             call_id=call_id,
             status="initialized"
         )
-        logger.info(f" Inserted initial call history for call_id: {call_id}")
-        
-        # Generate dynamic data based on industry (example for automobile)
-        dynamic_data = {}
-        if agent.get("industry") == "automobile":
-            dynamic_data = {
-                "cars": [
-                    {"model": "Tesla Model 3", "price": 40000, "description": "Electric sedan with autopilot."},
-                    {"model": "Ford F-150", "price": 30000, "description": "Popular pickup truck with high towing capacity."},
-                    {"model": "Toyota Camry", "price": 25000, "description": "Reliable mid-size sedan."}
-                ],
-                "last_updated": datetime.now(timezone.utc).isoformat()
-            }
         
         return JSONResponse({
             "success": True,
-            "dynamic_data": dynamic_data
+            "message": "Call history initialized"
         })
-    except HTTPException:
-        raise
     except Exception as e:
-        logging.error(f"Error handling new call: {e}")
-        traceback.print_exc()
+        logging.error(f"Error initializing call: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     
-
-
+    
 @router.get("/analytics")
 async def get_dashboard_analytics(current_user: dict = Depends(get_current_user)):
-    """
-    Get overall dashboard analytics:
-    - Total agents
-    - Total calls
-    - Completed/unanswered calls
-    - Average duration
-    - Daily call trends (last 7 days)
-    - Top 5 performing agents
-    """
+    """Get overall dashboard analytics"""
     try:
         user_id = current_user["id"]
         analytics = db.get_admin_dashboard_analytics(user_id)
+        
+        # 🔥 ADD PRESIGNED URLS TO TOP AGENTS
+        for agent in analytics.get("top_agents", []):
+            if agent.get("avatar_url"):
+                agent["avatar_presigned_url"] = generate_presigned_url(agent["avatar_url"], expiration=86400)
         
         return JSONResponse(
             status_code=200,
@@ -668,22 +686,20 @@ async def get_dashboard_analytics(current_user: dict = Depends(get_current_user)
         logging.error(f"Error fetching dashboard analytics: {e}")
         return error_response("Failed to fetch analytics", 500)
 
-
-
-
 @router.get("/agents")
 async def get_all_agents(
     page: int = Query(1, ge=1),
     page_size: int = Query(5, ge=1, le=100),
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Get paginated list of all agents with call statistics.
-    Used for "See More" agents table.
-    """
+    """Get paginated list of all agents with call statistics"""
     try:
         user_id = current_user["id"]
         result = db.get_agents_with_call_stats(user_id, page, page_size)
+        
+        # 🔥 ADD PRESIGNED URLS TO ALL AGENTS
+        for agent in result.get("agents", []):
+            add_presigned_urls_to_agent(agent)
         
         return JSONResponse(
             status_code=200,
@@ -696,7 +712,6 @@ async def get_all_agents(
         logging.error(f"Error fetching agents: {e}")
         return error_response("Failed to fetch agents", 500)
 
-
 @router.get("/agents/{agent_id}")
 async def get_agent_detail(
     agent_id: int,
@@ -704,13 +719,7 @@ async def get_agent_detail(
     calls_page_size: int = Query(10, ge=1, le=100),
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Get detailed agent information with paginated call history.
-    Returns:
-    - Agent details (name, prompt, number, industry, owner)
-    - Call statistics
-    - Paginated call history
-    """
+    """Get detailed agent information with paginated call history"""
     try:
         user_id = current_user["id"]
         agent_detail = db.get_agent_detail_with_calls(
@@ -719,6 +728,13 @@ async def get_agent_detail(
         
         if not agent_detail:
             return error_response("Agent not found", 404)
+        
+        # 🔥 ADD PRESIGNED URL TO AGENT
+        add_presigned_urls_to_agent(agent_detail)
+        
+        # 🔥 ADD PRESIGNED URLS TO CALLS
+        for call in agent_detail.get("calls", {}).get("data", []):
+            add_presigned_urls_to_call(call)
         
         return JSONResponse(
             status_code=200,
@@ -730,7 +746,6 @@ async def get_agent_detail(
     except Exception as e:
         logging.error(f"Error fetching agent detail: {e}")
         return error_response("Failed to fetch agent details", 500)
-
 
 @router.post("/agents")
 async def create_agent(
@@ -744,9 +759,7 @@ async def create_agent(
     avatar: UploadFile = File(None),
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Create a new agent with optional avatar image.
-    """
+    """Create a new agent with optional avatar image"""
     try:
         user_id = current_user["id"]
         
@@ -756,9 +769,9 @@ async def create_agent(
             return error_response("Phone number already in use", 400)
         
         # Upload avatar if provided
-        avatar_url = None
+        avatar_key = None  # Store OBJECT KEY, not URL
         if avatar and avatar.filename:
-            # Validate file type
+            # Validate file
             allowed_extensions = {'jpg', 'jpeg', 'png', 'gif', 'webp'}
             file_extension = avatar.filename.split('.')[-1].lower()
             
@@ -773,10 +786,10 @@ async def create_agent(
             if len(content) > 5 * 1024 * 1024:
                 return error_response("File too large. Maximum size: 5MB", 400)
             
-            # Upload to R2
+            # Upload to Hetzner
             try:
-                avatar_url = r2_storage.upload_avatar(content, file_extension)
-                logging.info(f"✅ Avatar uploaded: {avatar_url}")
+                avatar_key = hetzner_storage.upload_avatar(content, file_extension)
+                logging.info(f"✅ Avatar uploaded with key: {avatar_key}")
             except Exception as e:
                 logging.error(f"❌ Avatar upload failed: {e}")
                 return error_response("Failed to upload avatar", 500)
@@ -790,18 +803,21 @@ async def create_agent(
             "language": language,
             "industry": industry,
             "owner_name": owner_name,
-            "avatar_url": avatar_url,
+            "avatar_url": avatar_key,  # Store OBJECT KEY (e.g., "avatars/uuid.jpg")
             "admin_id": user_id
         }
         
         # Save to database
         agent = db.create_agent_with_voice_type(agent_data)
         
-        # 🔥 FIX: Convert datetime objects to ISO strings
+        # Format timestamps
         if agent.get("created_at"):
             agent["created_at"] = agent["created_at"].isoformat()
         if agent.get("updated_at"):
             agent["updated_at"] = agent["updated_at"].isoformat()
+        
+        # 🔥 ADD PRESIGNED URL FOR RESPONSE
+        add_presigned_urls_to_agent(agent)
         
         return JSONResponse(
             status_code=201,
@@ -819,7 +835,6 @@ async def create_agent(
         traceback.print_exc()
         return error_response("Failed to create agent", 500)
 
-
 @router.put("/agents/{agent_id}")
 async def update_agent(
     agent_id: int,
@@ -833,9 +848,7 @@ async def update_agent(
     avatar: UploadFile = File(None),
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Update agent details with optional new avatar.
-    """
+    """Update agent details with optional new avatar"""
     try:
         user_id = current_user["id"]
         
@@ -877,15 +890,16 @@ async def update_agent(
                 return error_response("File too large. Maximum size: 5MB", 400)
             
             try:
-                new_avatar_url = r2_storage.upload_avatar(content, file_extension)
+                # Upload new avatar
+                new_avatar_key = hetzner_storage.upload_avatar(content, file_extension)
                 
                 # Delete old avatar if exists
-                old_avatar_url = existing_agent.get("avatar_url")
-                if old_avatar_url:
-                    r2_storage.delete_avatar(old_avatar_url)
+                old_avatar_key = existing_agent.get("avatar_url")
+                if old_avatar_key:
+                    hetzner_storage.delete_avatar(old_avatar_key)
                 
-                updates["avatar_url"] = new_avatar_url
-                logging.info(f"✅ Avatar updated: {new_avatar_url}")
+                updates["avatar_url"] = new_avatar_key
+                logging.info(f"✅ Avatar updated: {new_avatar_key}")
                 
             except Exception as e:
                 logging.error(f"❌ Avatar upload failed: {e}")
@@ -900,11 +914,14 @@ async def update_agent(
         if not result:
             return error_response("Update failed", 500)
         
-        # 🔥 FIX: Convert datetime objects to ISO strings
+        # Format timestamps
         if result.get("created_at"):
             result["created_at"] = result["created_at"].isoformat()
         if result.get("updated_at"):
             result["updated_at"] = result["updated_at"].isoformat()
+        
+        # 🔥 ADD PRESIGNED URL
+        add_presigned_urls_to_agent(result)
         
         return JSONResponse(
             status_code=200,
@@ -921,22 +938,17 @@ async def update_agent(
         logging.error(f"Error updating agent: {e}")
         traceback.print_exc()
         return error_response("Failed to update agent", 500)
-    
-
 
 @router.delete("/agents/{agent_id}")
 async def delete_agent(
     agent_id: int,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Delete (deactivate) an agent and optionally delete avatar.
-    Only the agent owner can delete.
-    """
+    """Delete (deactivate) an agent and optionally delete avatar"""
     try:
         user_id = current_user["id"]
         
-        # Get agent details to find avatar URL
+        # Get agent details to find avatar
         agent = db.get_agent_by_id(agent_id)
         if not agent or agent["admin_id"] != user_id:
             return error_response("Agent not found or unauthorized", 404)
@@ -947,12 +959,12 @@ async def delete_agent(
         if not success:
             return error_response("Delete failed", 500)
         
-        # Delete avatar from R2 if exists
-        avatar_url = agent.get("avatar_url")
-        if avatar_url:
+        # Delete avatar from Hetzner if exists
+        avatar_key = agent.get("avatar_url")
+        if avatar_key:
             try:
-                r2_storage.delete_avatar(avatar_url)
-                logging.info(f" Avatar deleted for agent {agent_id}")
+                hetzner_storage.delete_avatar(avatar_key)
+                logging.info(f"🗑️ Avatar deleted for agent {agent_id}")
             except Exception as e:
                 logging.warning(f"⚠️ Could not delete avatar: {e}")
         
@@ -967,115 +979,16 @@ async def delete_agent(
     except Exception as e:
         logging.error(f"Error deleting agent: {e}")
         traceback.print_exc()
-        return error_response("Failed to delete agent", 500) 
+        return error_response("Failed to delete agent", 500)
 
-
-# # ============================================
-# # CALL DETAILS
-# # ============================================
-
-# @router.get("/calls/{call_id}/transcript")
-# async def get_call_transcript(
-#     call_id: str,
-#     agent_id: Optional[int] = Query(None),
-#     current_user: dict = Depends(get_current_user)
-# ):
-#     """
-#     Get transcript for a specific call.
-#     Optionally filter by agent_id for security.
-#     """
-#     try:
-#         user_id = current_user["id"]
-        
-#         # Get call details
-#         call = db.get_call_by_id(call_id, agent_id)
-        
-#         if not call:
-#             return error_response("Call not found", 404)
-        
-#         # Verify ownership
-#         agent = db.get_agent_by_id(call["agent_id"])
-#         if not agent or agent["admin_id"] != user_id:
-#             return error_response("Unauthorized", 403)
-        
-#         transcript = call.get("transcript")
-        
-#         if not transcript:
-#             return error_response("Transcript not available", 404)
-        
-#         return JSONResponse(
-#             status_code=200,
-#             content={
-#                 "success": True,
-#                 "data": {
-#                     "call_id": call_id,
-#                     "agent_id": call["agent_id"],
-#                     "agent_name": call["agent_name"],
-#                     "caller_number": call["caller_number"],
-#                     "transcript": transcript,
-#                     "duration": call.get("duration"),
-#                     "created_at": call.get("created_at")
-#                 }
-#             }
-#         )
-#     except Exception as e:
-#         logging.error(f"Error fetching transcript: {e}")
-#         return error_response("Failed to fetch transcript", 500)
-
-
-# @router.get("/calls/{call_id}/recording")
-# async def get_call_recording(
-#     call_id: str,
-#     agent_id: Optional[int] = Query(None),
-#     current_user: dict = Depends(get_current_user)
-# ):
-#     """
-#     Get recording for a specific call.
-#     Returns audio file as streaming response.
-#     """
-#     try:
-#         user_id = current_user["id"]
-        
-#         # Get call details
-#         call = db.get_call_by_id(call_id, agent_id)
-        
-#         if not call:
-#             return error_response("Call not found", 404)
-        
-#         # Verify ownership
-#         agent = db.get_agent_by_id(call["agent_id"])
-#         if not agent or agent["admin_id"] != user_id:
-#             return error_response("Unauthorized", 403)
-        
-#         # Get recording blob from database
-#         recording_data, content_type, size = db.get_recording_blob(call_id, agent_id)
-        
-#         if not recording_data:
-#             return error_response("Recording not available", 404)
-        
-#         # Return as streaming response
-#         return StreamingResponse(
-#             iter([recording_data]),
-#             media_type=content_type or "audio/ogg",
-#             headers={
-#                 "Content-Disposition": f"attachment; filename=\"recording_{call_id}.ogg\"",
-#                 "Content-Length": str(size or len(recording_data))
-#             }
-#         )
-#     except Exception as e:
-#         logging.error(f"Error fetching recording: {e}")
-#         return error_response("Failed to fetch recording", 500)
-
-
+# ==================== CALL DETAILS ====================
 @router.get("/calls/{call_id}")
 async def get_call_details(
     call_id: str,
     agent_id: Optional[int] = Query(None),
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Get complete call details including metadata.
-    """
+    """Get complete call details including metadata"""
     try:
         user_id = current_user["id"]
         
@@ -1089,6 +1002,9 @@ async def get_call_details(
         if not agent or agent["admin_id"] != user_id:
             return error_response("Unauthorized", 403)
         
+        # 🔥 ADD PRESIGNED URLS
+        call = add_presigned_urls_to_call(call)
+        
         return JSONResponse(
             status_code=200,
             content={
@@ -1100,32 +1016,32 @@ async def get_call_details(
         logging.error(f"Error fetching call details: {e}")
         return error_response("Failed to fetch call details", 500)
 
-
-
+# ==================== LIVEKIT WEBHOOK ====================
 @router.post("/livekit-webhook")
 async def livekit_webhook(request: Request):
+    """Handle LiveKit events for call lifecycle"""
     try:
         data = await request.json()
         event = data.get("event")
         room = data.get("room", {})
         call_id = room.get("name")
 
-        #  Extract call_id from egress events
+        # Extract call_id from egress events
         if not call_id:
             egress_info = data.get("egress_info", {}) or data.get("egressInfo", {})
             call_id = egress_info.get("room_name") or egress_info.get("roomName")
             if not call_id:
                 return JSONResponse({"message": "No call_id"})
 
-        #  Always log event
+        # Always log event
         add_call_event(call_id, event, data)
         
-        #  Ignore non-critical events
+        # Ignore non-critical events
         if event in ["room_started", "participant_joined", "egress_started", 
                      "egress_updated", "track_published", "track_unpublished"]:
             return JSONResponse({"message": f"{event} logged"})
 
-        #  Handle room end
+        # Handle room end
         if event in ["room_finished", "participant_left"]:
             await asyncio.sleep(0.5)
             
@@ -1138,14 +1054,14 @@ async def livekit_webhook(request: Request):
                     """, (call_id,))
                     row = cursor.fetchone()
             finally:
-                db.release_connection(conn)  #  FIXED: Changed from conn.close()
+                db.release_connection(conn)
 
             if not row:
                 return JSONResponse({"message": "Call not found"})
 
             current_status, events_log, db_started_at, created_at = row
             
-            #  Skip if already final
+            # Skip if already final
             if current_status in {"completed", "unanswered"}:
                 # Just update duration
                 started = db_started_at or created_at
@@ -1158,7 +1074,7 @@ async def livekit_webhook(request: Request):
                 })
                 return JSONResponse({"message": "Duration updated"})
 
-            #  Determine final status
+            # Determine final status
             answered = check_if_answered(events_log)
             final_status = "completed" if answered else "unanswered"
             
@@ -1191,28 +1107,16 @@ async def livekit_webhook(request: Request):
 
     except Exception as e:
         logging.error(f"Webhook error: {e}")
-        traceback.print_exc()  
+        traceback.print_exc()
         return JSONResponse({"error": str(e)}, status_code=500)
-    
 
-
+# ==================== OWNER FILTER ====================
 @router.get("/agents/by-owner/{owner_name}")
 async def get_agents_by_owner(
     owner_name: str,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Get all agents for the logged-in admin filtered by owner name.
-    
-    Parameters:
-    - owner_name: Owner name to search for (case-insensitive, partial match)
-    
-    Returns:
-    - List of agents with call statistics
-    
-    Example:
-    GET /api/agents/by-owner/John
-    """
+    """Get all agents for the logged-in admin filtered by owner name"""
     try:
         user_id = current_user["id"]
         
@@ -1222,6 +1126,10 @@ async def get_agents_by_owner(
         
         # Get agents
         agents = db.get_agents_by_owner_name(user_id, owner_name.strip())
+        
+        # 🔥 ADD PRESIGNED URLS
+        for agent in agents:
+            add_presigned_urls_to_agent(agent)
         
         return JSONResponse(
             status_code=200,
@@ -1237,3 +1145,77 @@ async def get_agents_by_owner(
         logging.error(f"Error fetching agents by owner: {e}")
         traceback.print_exc()
         return error_response("Failed to fetch agents by owner", 500)
+    
+
+
+@router.post("/agent/book-appointment")
+async def book_appointment(request: Request):
+    """
+    API for LiveKit agent to book an appointment
+    """
+    try:
+        data = await request.json()
+        
+        user_id = data.get("user_id")
+        appointment_date = data.get("appointment_date") 
+        start_time = data.get("start_time")
+        end_time = data.get("end_time")
+        attendee_name = data.get("attendee_name", "Valued Customer")
+        title = data.get("title", "Appointment")
+        description = data.get("description", "")
+        organizer_name = data.get("organizer_name")
+        organizer_email = data.get("organizer_email")
+        
+        if not all([user_id, appointment_date, start_time, end_time, organizer_email]):
+            return error_response("Missing required fields", status_code=400)
+        
+        has_conflict = db.check_appointment_conflict(
+            user_id=user_id,
+            appointment_date=appointment_date,
+            start_time=start_time,
+            end_time=end_time
+        )
+        
+        if has_conflict:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "message": "Time slot already booked",
+                    "conflict": True
+                }
+            )
+        
+        appointment_id = db.create_appointment(
+            user_id=user_id,
+            appointment_date=appointment_date,
+            start_time=start_time,
+            end_time=end_time,
+            attendee_name=attendee_name,
+            attendee_email=organizer_email,
+            title=title,
+            description=description
+        )
+        
+        email_sent = await mail_obj.send_email_with_calendar_event(
+            attendee_email=organizer_email,
+            attendee_name=organizer_name,
+            appointment_date=appointment_date,
+            start_time=start_time,
+            end_time=end_time,
+            title=title,
+            description=description,
+            organizer_name=organizer_name,
+            organizer_email=organizer_email
+        )
+        
+        return JSONResponse({
+            "success": True,
+            "appointment_id": appointment_id,
+            "email_sent": email_sent,
+            "message": "Appointment booked successfully"
+        })
+        
+    except Exception as e:
+        logging.error(f"Error booking appointment: {e}")
+        return error_response(f"Failed to book appointment: {str(e)}", status_code=500)
