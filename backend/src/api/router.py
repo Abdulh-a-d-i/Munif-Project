@@ -422,7 +422,7 @@ async def save_call_data(request: Request):
         if transcript_blob:
             async def delayed_transcript():
                 await asyncio.sleep(5)
-                logging.info(f"📄 Downloading transcript for {call_id}")
+                logging.info(f"?? Downloading transcript for {call_id}")
                 await fetch_and_store_transcript(call_id, None, transcript_blob)
             asyncio.create_task(delayed_transcript())
         
@@ -938,6 +938,7 @@ async def update_agent(
         logging.error(f"Error updating agent: {e}")
         traceback.print_exc()
         return error_response("Failed to update agent", 500)
+    
 
 @router.delete("/agents/{agent_id}")
 async def delete_agent(
@@ -966,7 +967,7 @@ async def delete_agent(
                 hetzner_storage.delete_avatar(avatar_key)
                 logging.info(f"🗑️ Avatar deleted for agent {agent_id}")
             except Exception as e:
-                logging.warning(f"⚠️ Could not delete avatar: {e}")
+                logging.warning(f"?? Could not delete avatar: {e}")
         
         return JSONResponse(
             status_code=200,

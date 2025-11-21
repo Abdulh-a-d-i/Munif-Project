@@ -1170,6 +1170,7 @@ class PGDB:
             logging.error(f"Error fetching agents by owner name: {e}")
             raise
         finally:
+
             self.release_connection(conn)
 
 

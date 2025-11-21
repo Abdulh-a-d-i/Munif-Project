@@ -10,7 +10,6 @@ import base64
 import httpx
 import traceback
 from datetime import datetime, timezone  
-from livekit import api
 
 from src.utils.db import PGDB
 
@@ -240,85 +239,10 @@ def add_call_event(call_id: str, event_type: str, event_data: dict = None):
     finally:
         db.release_connection(conn)  # ✅ 
 
-from livekit import api
 import os
 import asyncio
 from dotenv import load_dotenv
 
-
-LIVEKIT_API_URL = os.getenv("LIVEKIT_URL", "").replace("wss://", "https://")
-
-async def get_livekit_call_status(call_id: str):
-    """
-    Get current status from LiveKit API
-    """
-    try:
-        lkapi = api.LiveKitAPI(
-            url=os.getenv("LIVEKIT_URL", "").replace("wss://", "https://"),
-            api_key=os.getenv("LIVEKIT_API_KEY"),
-            api_secret=os.getenv("LIVEKIT_API_SECRET"),
-        )
-        
-        room_info = await lkapi.room.list_rooms(api.ListRoomsRequest())
-        
-        room_exists = any(room.name == call_id for room in room_info.rooms)
-        
-        logging.info(f"🔍 LiveKit Check: Room {call_id} exists = {room_exists}")
-        
-        await lkapi.aclose()
-        
-        if room_exists:
-            return {
-                "status": "active",
-                "message": "Call is in progress"
-            }
-        else:
-            return {
-                "status": "ended",
-                "message": "Room not found in LiveKit"
-            }
-            
-    except Exception as e:
-        logging.error(f"Error checking LiveKit status: {e}")
-        return {
-            "status": "unknown",
-            "error": str(e)
-        }
-
-
-import traceback
-
-
-
-
-async def _fetch_from_url(url: str) -> bytes:
-    """
-    Download the ACTUAL AUDIO FILE from HTTP URL.
-    Returns: Raw audio bytes (MP3/OGG file content)
-    """
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.get(url)
-            
-            if response.status_code == 200:
-                # ✅ This is the ACTUAL AUDIO FILE content
-                recording_bytes = response.content
-                logging.info(f"✅ Downloaded {len(recording_bytes)} bytes of AUDIO from URL")
-                return recording_bytes
-            else:
-                logging.error(f"❌ Failed to download: HTTP {response.status_code}")
-                return None
-                
-    except Exception as e:
-        logging.error(f"❌ Failed to download from URL: {e}")
-        return None
-
-
-
-
-# ============================================
-# ✅ HELPER FUNCTIONS
-# ============================================
 
 def calculate_duration(started_at, ended_at) -> float:
     """
