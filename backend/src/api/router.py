@@ -49,7 +49,7 @@ from src.utils.utils import (
     generate_presigned_url,
     get_s3_client
 )
-from livekit import api
+
 from fastapi import File, UploadFile, Form
 
 load_dotenv()
