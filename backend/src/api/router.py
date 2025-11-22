@@ -436,110 +436,7 @@ async def save_call_data(request: Request):
         logging.error(f"save_call_data error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# ==================== RECORDING & TRANSCRIPT ACCESS ====================
-@router.options("/calls/{call_id}/recording/stream")
-async def stream_call_recording_options(call_id: str):
-    return Response(
-        status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
-            "Access-Control-Allow-Headers": "Range, Content-Type, Authorization, Accept",
-            "Access-Control-Max-Age": "3600"
-        }
-    )
-
-@router.get("/calls/{call_id}/recording/stream")
-async def stream_call_recording(
-    call_id: str, 
-    user=Depends(get_current_user),
-    request: Request = None
-):
-    """
-    Stream recording from Hetzner bucket using presigned URL redirect.
-    
-    Flow:
-    1. Get recording_blob path from DB
-    2. Generate presigned URL (valid 1 hour)
-    3. Redirect browser to presigned URL
-    """
-    try:
-        conn = db.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT recording_blob, agent_id
-                    FROM call_history
-                    WHERE call_id = %s
-                """, (call_id,))
-                row = cursor.fetchone()
-        finally:
-            db.release_connection(conn)
-        
-        if not row or not row[0]:
-            raise HTTPException(status_code=404, detail="Recording not found")
-        
-        recording_blob, agent_id = row
-        
-        # Verify ownership
-        agent = db.get_agent_by_id(agent_id)
-        if not agent or agent["admin_id"] != user["id"]:
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        # 🔥 Generate presigned URL (valid for 1 hour)
-        presigned_url = generate_presigned_url(recording_blob, expiration=3600)
-        
-        if not presigned_url:
-            raise HTTPException(status_code=500, detail="Failed to generate access URL")
-        
-        # Redirect to presigned URL
-        return RedirectResponse(url=presigned_url, status_code=302)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f"Error streaming recording: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/calls/{call_id}/transcript")
-async def get_call_transcript(call_id: str, user=Depends(get_current_user)):
-    """
-    Get transcript for a specific call.
-    
-    Transcript is stored as JSONB in database (downloaded from Hetzner after call ends).
-    """
-    try:
-        conn = db.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT transcript, agent_id
-                    FROM call_history
-                    WHERE call_id = %s
-                """, (call_id,))
-                row = cursor.fetchone()
-        finally:
-            db.release_connection(conn)
-        
-        if not row:
-            raise HTTPException(status_code=404, detail="Call not found")
-        
-        transcript, agent_id = row
-        
-        # Verify ownership
-        agent = db.get_agent_by_id(agent_id)
-        if not agent or agent["admin_id"] != user["id"]:
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        if not transcript:
-            raise HTTPException(status_code=404, detail="Transcript not available yet")
-        
-        return JSONResponse({"transcript": transcript})
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f"Error fetching transcript: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+#
 
 # ==================== AGENT MANAGEMENT ====================
 @router.get("/agents/{agent_id}/calls")
@@ -985,7 +882,6 @@ async def delete_agent(
         traceback.print_exc()
         return error_response("Failed to delete agent", 500)
 
-# ==================== CALL DETAILS ====================
 @router.get("/calls/{call_id}")
 async def get_call_details(
     call_id: str,
@@ -1006,6 +902,14 @@ async def get_call_details(
         if not agent or agent["admin_id"] != user_id:
             return error_response("Unauthorized", 403)
         
+        # 🔥 FORMAT TIMESTAMPS BEFORE ADDING PRESIGNED URLS
+        for field in ["created_at", "started_at", "ended_at", "updated_at"]:
+            if call.get(field):
+                if hasattr(call[field], 'isoformat'):
+                    call[field] = call[field].isoformat()
+                else:
+                    call[field] = str(call[field])
+        
         # 🔥 ADD PRESIGNED URLS
         call = add_presigned_urls_to_call(call)
         
@@ -1018,6 +922,7 @@ async def get_call_details(
         )
     except Exception as e:
         logging.error(f"Error fetching call details: {e}")
+        traceback.print_exc()  # Add this to see full error
         return error_response("Failed to fetch call details", 500)
 
 # ==================== LIVEKIT WEBHOOK ====================
