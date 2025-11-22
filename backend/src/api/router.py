@@ -31,7 +31,9 @@ from src.api.base_models import (
     Assistant_Payload,
     PromptCustomizationUpdate,
     UpdateAgentRequest,
-    CreateAgentRequest
+    CreateAgentRequest,
+    ResetPasswordRequest,
+    ForgotPasswordRequest
 )
 from src.utils.db import PGDB 
 from src.utils.mail_management import Send_Mail
@@ -39,13 +41,13 @@ from src.utils.jwt_utils import create_access_token
 from src.utils.utils import (
     get_current_user, 
     add_call_event, 
-    get_livekit_call_status, 
     fetch_and_store_transcript, 
     fetch_and_store_recording, 
     calculate_duration, 
     check_if_answered, 
     hetzner_storage,
-    generate_presigned_url
+    generate_presigned_url,
+    get_s3_client
 )
 from livekit import api
 from fastapi import File, UploadFile, Form
@@ -641,13 +643,13 @@ async def get_agent_config(phone_number: str):
 
 @router.get("/agent/new-call")
 async def new_call(phone_number: str = Query(...), call_id: str = Query(...)):
-    """Just insert call history - no dynamic data needed"""
+    """Initialize call history record"""
     try:
         agent = db.get_agent_by_phone(phone_number)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         
-        # Just insert call history
+        # 🔥 FIX: Actually insert the call history record
         db.insert_call_history(
             agent_id=agent["agent_id"],
             call_id=call_id,
@@ -656,12 +658,13 @@ async def new_call(phone_number: str = Query(...), call_id: str = Query(...)):
         
         return JSONResponse({
             "success": True,
-            "message": "Call history initialized"
+            "message": "Call history initialized",
+            "agent_id": agent["agent_id"]  # Return agent_id for verification
         })
     except Exception as e:
         logging.error(f"Error initializing call: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-    
     
 @router.get("/analytics")
 async def get_dashboard_analytics(current_user: dict = Depends(get_current_user)):
@@ -1220,3 +1223,400 @@ async def book_appointment(request: Request):
     except Exception as e:
         logging.error(f"Error booking appointment: {e}")
         return error_response(f"Failed to book appointment: {str(e)}", status_code=500)
+    
+
+@router.post("/forgot-password")
+async def forgot_password(request: ForgotPasswordRequest):
+    """Send password reset email"""
+    try:
+        email = request.email.strip().lower()
+        
+        conn = db.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
+                user = cursor.fetchone()
+        finally:
+            db.release_connection(conn)
+        
+        if not user:
+            logging.warning(f"Password reset requested for non-existent email: {email}")
+            return JSONResponse({
+                "success": True,
+                "message": "If that email exists, a reset link has been sent."
+            })
+        
+        from src.utils.jwt_utils import create_password_reset_token
+        reset_token = create_password_reset_token(email)
+        
+        frontend_url = os.getenv("FRONTEND_URL", "https://munif-agent.vercel.app")
+        mail_obj = Send_Mail()  
+        email_sent = await mail_obj.send_password_reset_email(email, reset_token, frontend_url)
+        
+        return JSONResponse({
+            "success": True,
+            "message": "If that email exists, a reset link has been sent."
+        })
+        
+    except Exception as e:
+        logging.error(f"Error in forgot password: {e}")
+        traceback.print_exc()
+        return error_response("Failed to process request", 500)
+
+@router.post("/reset-password")
+async def reset_password(request: ResetPasswordRequest):
+    """Reset password using token"""
+    try:
+        from src.utils.jwt_utils import verify_password_reset_token
+        
+        email = verify_password_reset_token(request.token)
+        
+        if not email:
+            return error_response("Invalid or expired reset token", 400)
+        
+        # Update password
+        db.update_user_password(email, request.new_password)
+        
+        return JSONResponse({
+            "success": True,
+            "message": "Password updated successfully. You can now login."
+        })
+        
+    except ValueError as e:
+        return error_response(str(e), 400)
+    except Exception as e:
+        logging.error(f"Error resetting password: {e}")
+        traceback.print_exc()
+        return error_response("Failed to reset password", 500)
+    
+
+
+@router.post("/admin/bulk-upload-voices")
+async def bulk_upload_voices(
+    voice_doc: UploadFile = File(..., description="Text document with voice metadata"),
+    audio_files: List[UploadFile] = File(..., description="Audio files (.mp3)"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    ONE-TIME BULK UPLOAD: Parse voice document + upload audio files + save to DB.
+    """
+    import tempfile
+    import shutil
+    import re
+    from pathlib import Path
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # ==================== STEP 1: PARSE DOCUMENT ====================
+        logger.info("📋 Step 1: Parsing voice document...")
+        doc_content = (await voice_doc.read()).decode('utf-8')
+        
+        # Language mapping
+        LANGUAGE_TO_COUNTRY = {
+            "en": "US", "de": "DE", "fr": "FR",
+            "nl": "NL", "it": "IT", "es": "ES"
+        }
+        
+        language_patterns = {
+            'english': 'en', 'german': 'de', 'french': 'fr',
+            'dutch': 'nl', 'italian': 'it', 'spanish': 'es'
+        }
+        
+        voices = []
+        current_language = None
+        current_voice = {}
+        
+        for line in doc_content.split('\n'):
+            line = line.strip()
+            
+            # Skip empty lines
+            if not line:
+                continue
+            
+            # Detect language section
+            for lang_name, lang_code in language_patterns.items():
+                if lang_name.lower() in line.lower() and ('voice' in line.lower() or 'agent' in line.lower()):
+                    current_language = lang_code
+                    logger.info(f"🌐 Found language section: {lang_name.upper()} ({lang_code})")
+                    break
+            
+            # 🔥 FIX: Match ANY "Name:" pattern (not just "First Name:", "Second Name:", etc.)
+            if re.match(r'^(First\s+|Second\s+|Third\s+|Fourth\s+)?Name:\s*.+', line, re.IGNORECASE):
+                # Save previous voice if complete
+                if current_voice and all(k in current_voice for k in ['voice_name', 'gender', 'voice_id', 'audio_filename']):
+                    voices.append(current_voice)
+                    logger.info(f"  ✓ Added: {current_voice['voice_name']}")
+                
+                # Start new voice
+                name = re.sub(r'^(First\s+|Second\s+|Third\s+|Fourth\s+)?Name:\s*', '', line, flags=re.IGNORECASE).strip()
+                current_voice = {
+                    'voice_name': name,
+                    'language': current_language,
+                    'country_code': LANGUAGE_TO_COUNTRY.get(current_language, 'US')
+                }
+            
+            elif line.startswith('Gender:'):
+                gender = line.split(':', 1)[1].strip().lower()
+                current_voice['gender'] = gender
+            
+            elif line.startswith('ID:'):
+                voice_id = line.split(':', 1)[1].strip()
+                current_voice['voice_id'] = voice_id
+            
+            elif line.startswith('Audio:'):
+                audio_filename = line.split(':', 1)[1].strip()
+                # Clean filename - remove extra spaces
+                audio_filename = re.sub(r'\s+', ' ', audio_filename)
+                current_voice['audio_filename'] = audio_filename
+        
+        # Add last voice
+        if current_voice and all(k in current_voice for k in ['voice_name', 'gender', 'voice_id', 'audio_filename']):
+            voices.append(current_voice)
+            logger.info(f"  ✓ Added: {current_voice['voice_name']}")
+        
+        logger.info(f"✅ Parsed {len(voices)} voices from document")
+        
+        if not voices:
+            return error_response("No voices found in document", 400)
+        
+        # Log parsed voices for debugging
+        for v in voices:
+            logger.info(f"  📝 {v['voice_name']} ({v['language']}) - {v['voice_id']}")
+            logger.info(f"     Audio: {v['audio_filename']}")
+        
+        # ==================== STEP 2: SAVE AUDIO FILES TEMPORARILY ====================
+        logger.info("💾 Step 2: Saving audio files to temp directory...")
+        temp_dir = Path(tempfile.mkdtemp())
+        
+        audio_file_map = {}
+        for audio_file in audio_files:
+            if not audio_file.filename.endswith('.mp3'):
+                logger.warning(f"  ⚠️ Skipping non-MP3 file: {audio_file.filename}")
+                continue
+            
+            file_path = temp_dir / audio_file.filename
+            with open(file_path, 'wb') as f:
+                content = await audio_file.read()
+                f.write(content)
+            
+            # Store both original and normalized versions
+            audio_file_map[audio_file.filename] = file_path
+            
+            # Also add normalized version for fuzzy matching
+            normalized_name = audio_file.filename.lower().replace(' ', '').replace('_', '').replace('-', '')
+            audio_file_map[normalized_name] = file_path
+            
+            logger.info(f"  ✓ Saved: {audio_file.filename}")
+        
+        logger.info(f"✅ Saved {len(audio_files)} audio files")
+        
+        # ==================== STEP 3: MATCH VOICES WITH AUDIO FILES ====================
+        logger.info("🔗 Step 3: Matching voices with audio files...")
+        matched_voices = []
+        
+        for voice in voices:
+            expected_filename = voice['audio_filename']
+            matched = False
+            
+            # Try 1: Exact match
+            if expected_filename in audio_file_map:
+                voice['audio_path'] = audio_file_map[expected_filename]
+                matched_voices.append(voice)
+                logger.info(f"✅ Exact match: {voice['voice_name']} → {expected_filename}")
+                matched = True
+                continue
+            
+            # Try 2: Check if file exists in temp_dir
+            exact_path = temp_dir / expected_filename
+            if exact_path.exists():
+                voice['audio_path'] = exact_path
+                matched_voices.append(voice)
+                logger.info(f"✅ File system match: {voice['voice_name']} → {expected_filename}")
+                matched = True
+                continue
+            
+            # Try 3: Normalize and fuzzy match
+            normalized_expected = expected_filename.lower().replace(' ', '').replace('_', '').replace('-', '')
+            
+            if normalized_expected in audio_file_map:
+                voice['audio_path'] = audio_file_map[normalized_expected]
+                matched_voices.append(voice)
+                actual_name = audio_file_map[normalized_expected].name
+                logger.info(f"✅ Fuzzy match: {voice['voice_name']} → {actual_name}")
+                matched = True
+                continue
+            
+            # Try 4: Partial matching (contains voice_id)
+            voice_id = voice.get('voice_id', '').lower()
+            if voice_id:
+                for filename, filepath in audio_file_map.items():
+                    if voice_id in filename.lower():
+                        voice['audio_path'] = filepath
+                        matched_voices.append(voice)
+                        logger.info(f"✅ ID match: {voice['voice_name']} → {filepath.name}")
+                        matched = True
+                        break
+            
+            if not matched:
+                logger.warning(f"⚠️ No audio file found for: {voice['voice_name']} (expected: {expected_filename})")
+        
+        logger.info(f"✅ Matched {len(matched_voices)}/{len(voices)} voices")
+        
+        if not matched_voices:
+            shutil.rmtree(temp_dir)
+            return error_response("No audio files matched with document data", 400)
+        
+        # ==================== STEP 4: UPLOAD TO HETZNER ====================
+        logger.info("☁️ Step 4: Uploading to Hetzner...")
+        s3_client = get_s3_client()
+        bucket_name = HETZNER_BUCKET_NAME
+        
+        uploaded_voices = []
+        upload_errors = []
+        
+        for voice in matched_voices:
+            try:
+                audio_path = voice['audio_path']
+                
+                # Read audio file
+                with open(audio_path, 'rb') as f:
+                    audio_content = f.read()
+                
+                # Create blob path
+                voice_id = voice['voice_id']
+                blob_path = f"voice_samples/{voice_id}.mp3"
+                
+                # Upload to Hetzner
+                logger.info(f"  📤 Uploading {voice['voice_name']} ({len(audio_content)} bytes)...")
+                s3_client.put_object(
+                    Bucket=bucket_name,
+                    Key=blob_path,
+                    Body=audio_content,
+                    ContentType='audio/mpeg',
+                    CacheControl='public, max-age=31536000'
+                )
+                
+                voice['audio_blob_path'] = blob_path
+                uploaded_voices.append(voice)
+                
+                logger.info(f"✅ Uploaded: {voice['voice_name']} → {blob_path}")
+                
+            except Exception as e:
+                error_msg = f"Upload failed for {voice['voice_name']}: {str(e)}"
+                logger.error(f"❌ {error_msg}")
+                upload_errors.append(error_msg)
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        logger.info(f"✅ Uploaded {len(uploaded_voices)} files to Hetzner")
+        
+        if upload_errors:
+            logger.error("Upload errors:")
+            for err in upload_errors:
+                logger.error(f"  - {err}")
+        
+        # ==================== STEP 5: SAVE TO DATABASE ====================
+        logger.info("💾 Step 5: Saving to database...")
+        saved_count = 0
+        failed = []
+        
+        for voice in uploaded_voices:
+            try:
+                db.insert_voice_sample({
+                    'voice_name': voice['voice_name'],
+                    'voice_id': voice['voice_id'],
+                    'language': voice['language'],
+                    'country_code': voice['country_code'],
+                    'gender': voice['gender'],
+                    'audio_blob_path': voice['audio_blob_path'],
+                    'duration_seconds': None
+                })
+                saved_count += 1
+                logger.info(f"✅ Saved to DB: {voice['voice_name']}")
+            except Exception as e:
+                logger.error(f"❌ DB save failed for {voice['voice_name']}: {e}")
+                failed.append(voice['voice_name'])
+                import traceback
+                traceback.print_exc()
+        
+        # ==================== CLEANUP ====================
+        shutil.rmtree(temp_dir)
+        logger.info("🧹 Cleaned up temp files")
+        
+        # ==================== RESPONSE ====================
+        return JSONResponse({
+            "success": True,
+            "message": f"✅ Successfully uploaded {saved_count} voice samples!",
+            "summary": {
+                "parsed_from_document": len(voices),
+                "matched_with_audio": len(matched_voices),
+                "uploaded_to_hetzner": len(uploaded_voices),
+                "saved_to_database": saved_count,
+                "failed": len(failed)
+            },
+            "voices": [
+                {
+                    "name": v['voice_name'],
+                    "language": v['language'],
+                    "gender": v['gender'],
+                    "voice_id": v['voice_id'],
+                    "audio_blob_path": v.get('audio_blob_path')
+                }
+                for v in uploaded_voices
+            ],
+            "failed_voices": failed if failed else None,
+            "upload_errors": upload_errors if upload_errors else None
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Bulk upload error: {e}")
+        import traceback
+        traceback.print_exc()
+        return error_response(f"Upload failed: {str(e)}", 500)
+
+@router.get("/voice-samples")
+async def get_voice_samples(language: Optional[str] = Query(None)):
+    """
+    PUBLIC endpoint - Get all voice samples with presigned URLs
+    No authentication required
+    """
+    try:
+        # Get samples from database
+        if language:
+            samples = db.get_voice_samples_by_language(language)
+        else:
+            samples = db.get_all_voice_samples()
+        
+        # Add presigned URLs (valid for 24 hours)
+        for sample in samples:
+            if sample.get("audio_blob_path"):
+                sample["audio_url"] = generate_presigned_url(
+                    sample["audio_blob_path"],
+                    expiration=86400  # 24 hours
+                )
+            
+            # Format timestamp
+            if sample.get("created_at"):
+                sample["created_at"] = sample["created_at"].isoformat()
+        
+        # Group by language for easier frontend consumption
+        grouped = {}
+        for sample in samples:
+            lang = sample["language"]
+            if lang not in grouped:
+                grouped[lang] = []
+            grouped[lang].append(sample)
+        
+        return JSONResponse({
+            "success": True,
+            "total": len(samples),
+            "grouped_by_language": grouped,
+            "all_samples": samples
+        })
+        
+    except Exception as e:
+        logging.error(f"Error fetching voice samples: {e}")
+        traceback.print_exc()
+        return error_response("Failed to fetch voice samples", 500)

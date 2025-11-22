@@ -36,6 +36,7 @@ class PGDB:
         self.create_users_table()
         self.create_agents_table()  # NEW: Agents table
         self.create_call_history_table()
+        self.create_voice_samples_table()
 
     def get_connection(self):
         """Get connection from pool"""
@@ -967,7 +968,7 @@ class PGDB:
                     "last_call_at": stats["last_call_at"].isoformat() if stats["last_call_at"] else None
                 }
                 
-                # Get paginated call history
+                # Get paginated call history - INCLUDE recording_blob and transcript_blob
                 offset = (calls_page - 1) * calls_page_size
                 cursor.execute("""
                     SELECT 
@@ -979,8 +980,11 @@ class PGDB:
                         created_at,
                         started_at,
                         ended_at,
+                        transcript,
                         transcript_url,
-                        recording_url
+                        transcript_blob,
+                        recording_url,
+                        recording_blob
                     FROM call_history
                     WHERE agent_id = %s
                     ORDER BY created_at DESC
@@ -1016,7 +1020,6 @@ class PGDB:
             raise
         finally:
             self.release_connection(conn)
-
 
     def create_agent_with_voice_type(self, agent_data: dict):
         """
@@ -1202,5 +1205,110 @@ class PGDB:
             conn.rollback()
             logging.error(f"Error updating password: {e}")
             raise
+        finally:
+            self.release_connection(conn)
+
+
+
+
+    def create_voice_samples_table(self):
+        """Create voice_samples table"""
+        conn = self.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS voice_samples (
+                        id SERIAL PRIMARY KEY,
+                        voice_name VARCHAR(100) NOT NULL,
+                        voice_id VARCHAR(50) NOT NULL UNIQUE,
+                        language VARCHAR(10) NOT NULL,
+                        country_code VARCHAR(5) NOT NULL,
+                        gender VARCHAR(10),
+                        audio_blob_path TEXT NOT NULL,
+                        duration_seconds FLOAT,
+                        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_voice_samples_language 
+                    ON voice_samples(language);
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_voice_samples_gender 
+                    ON voice_samples(gender);
+                """)
+            conn.commit()
+            logging.info("✅ voice_samples table created")
+        except Exception as e:
+            logging.error(f"Error creating voice_samples table: {e}")
+        finally:
+            self.release_connection(conn)
+
+    def insert_voice_sample(self, voice_data: dict):
+        """Insert a voice sample record (without updated_at)"""
+        conn = self.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    INSERT INTO voice_samples (
+                        voice_name, voice_id, language, country_code, 
+                        gender, audio_blob_path, duration_seconds
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (voice_id) DO UPDATE SET
+                        audio_blob_path = EXCLUDED.audio_blob_path
+                    RETURNING *;
+                """, (
+                    voice_data["voice_name"],
+                    voice_data["voice_id"],
+                    voice_data["language"],
+                    voice_data["country_code"],
+                    voice_data.get("gender"),
+                    voice_data["audio_blob_path"],
+                    voice_data.get("duration_seconds")
+                ))
+                result = cursor.fetchone()
+            conn.commit()
+            logging.info(f"✅ Voice sample saved: {voice_data['voice_name']}")
+            return result
+        except Exception as e:
+            conn.rollback()
+            logging.error(f"Error inserting voice sample: {e}")
+            raise
+        finally:
+            self.release_connection(conn)
+
+    def get_all_voice_samples(self):
+        """Get all voice samples"""
+        conn = self.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        id, voice_name, voice_id, language, 
+                        country_code, gender, audio_blob_path,
+                        duration_seconds, created_at
+                    FROM voice_samples
+                    ORDER BY language, voice_name
+                """)
+                return cursor.fetchall()
+        finally:
+            self.release_connection(conn)
+
+    def get_voice_samples_by_language(self, language: str):
+        """Get voice samples filtered by language"""
+        conn = self.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        id, voice_name, voice_id, language, 
+                        country_code, gender, audio_blob_path,
+                        duration_seconds, created_at
+                    FROM voice_samples
+                    WHERE language = %s
+                    ORDER BY voice_name
+                """, (language,))
+                return cursor.fetchall()
         finally:
             self.release_connection(conn)

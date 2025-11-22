@@ -37,7 +37,7 @@ load_dotenv(".env")
 logger = logging.getLogger("inbound-agent",)
 logger.setLevel(logging.INFO)
 # Environment variables
-BACKEND_API_URL = os.getenv("BACKEND_API_URL", "https://felica-woozier-jettie.ngrok-free.dev/api")
+BACKEND_API_URL = os.getenv("BACKEND_API_URL", "https://full-shrimp-deeply.ngrok-free.app/api")
 HETZNER_BUCKET_NAME = os.getenv("HETZNER_BUCKET_NAME")
 HETZNER_ENDPOINT = os.getenv("HETZNER_ENDPOINT_URL")
 HETZNER_ACCESS_KEY = os.getenv("HETZNER_ACCESS_KEY")
@@ -181,7 +181,7 @@ def get_s3_client():
         endpoint_url=HETZNER_ENDPOINT,
         aws_access_key_id=HETZNER_ACCESS_KEY,
         aws_secret_access_key=HETZNER_SECRET_KEY,
-        region_name=os.getenv("HETZNER_REGION", "fsn1")
+        region_name=os.getenv("HETZNER_REGION", "hel1")
     )
 
 async def send_status_to_backend(
@@ -615,7 +615,7 @@ async def entrypoint(ctx: JobContext):
     async def upload_transcript():
         """Upload transcript to Hetzner Object Storage and send metadata to backend"""
         if not UPLOAD_TRANSCRIPTS:
-            logger.info(" Transcript upload disabled")
+            logger.info("📄 Transcript upload disabled")
             return
         try:
             transcript_obj = session.history.to_dict() if hasattr(session, 'history') else {"messages": []}
@@ -634,60 +634,59 @@ async def entrypoint(ctx: JobContext):
                 ContentType='application/json'
             )
             
-            # Generate presigned URL (24 hours)
-            signed_url = s3_client.generate_presigned_url(
-                'get_object',
-                Params={'Bucket': HETZNER_BUCKET_NAME, 'Key': blob_name},
-                ExpiresIn=86400  # 24 hours
-            )
+            logger.info(f"✅ Transcript uploaded: {blob_name}")
             
-            logger.info(f" Transcript uploaded: {blob_name}")
-            
+            # 🔥 FIX: Send BOTH transcript AND recording data
             payload = {
-                "agent_id": agent.agent_id,
                 "call_id": ctx.room.name,
-                "caller_number": agent.caller_phone,
-                "transcript_url": signed_url,
-                "transcript_blob": blob_name,
-                "recording_url": agent.recording_url,
-                "recording_blob": agent.recording_blob_path,
-                "uploaded_at": ts
+                "transcript_blob": blob_name,  # Transcript blob path
+                # Recording was already uploaded by LiveKit, just reference it
+                "recording_blob": agent.recording_blob_path if agent.recording_blob_path else None,
+                "recording_url": agent.recording_url if agent.recording_url else None
             }
             
-            # Send to backend (rest of code remains same)
+            # Remove None values
+            payload = {k: v for k, v in payload.items() if v is not None}
+            
+            logger.info(f"📤 Sending call data to backend: {payload}")
+            
+            # Send to backend with retries
             max_retries = 3
             for attempt in range(max_retries):
                 try:
                     async with httpx.AsyncClient(timeout=60.0) as c:
                         response = await c.post(
                             f"{BACKEND_API_URL}/agent/save-call-data",
-                            json=payload
+                            json=payload,
+                            headers={"Authorization": f"Bearer {AGENT_API_SECRET}"}
                         )
                         if response.status_code == 200:
-                            logger.info(" Call data sent to backend")
+                            logger.info("✅ Call data sent to backend successfully")
                             break
                         else:
-                            logger.warning(f" Backend returned {response.status_code}")
+                            logger.warning(f"⚠️ Backend returned {response.status_code}: {response.text}")
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(2)
                 except httpx.ReadTimeout:
                     if attempt < max_retries - 1:
-                        logger.warning(f" Timeout on attempt {attempt + 1}, retrying...")
+                        logger.warning(f"⏳ Timeout on attempt {attempt + 1}, retrying...")
                         await asyncio.sleep(2)
                     else:
-                        logger.error(f" Backend timeout after {max_retries} attempts")
+                        logger.error(f"❌ Backend timeout after {max_retries} attempts")
                 except Exception as e:
-                    logger.error(f" Backend request failed: {e}")
+                    logger.error(f"❌ Backend request failed: {e}")
+                    traceback.print_exc()
                     break
+                    
         except Exception as e:
-            logger.error(f" Transcript upload failed: {e}")
+            logger.error(f"❌ Transcript upload failed: {e}")
             traceback.print_exc()
-
     ctx.add_shutdown_callback(upload_transcript)
     
     #  STATUS 1: INITIALIZED 
     await ctx.connect()
     await send_status_to_backend(ctx.room.name, "initialized", agent_id)
     
-    #  START RECORDING 
     if UPLOAD_RECORDINGS:
         try:
             safe_phone = phone_number.replace("+", "").replace("-", "").replace(" ", "")
@@ -697,6 +696,12 @@ async def entrypoint(ctx: JobContext):
             agent.recording_blob_path = recording_filename
             
             logger.info(f"🎙️ Starting recording: {recording_filename}")
+            
+            # Extract base endpoint WITHOUT bucket subdomain
+            livekit_endpoint = HETZNER_ENDPOINT.replace(f"{HETZNER_BUCKET_NAME}.", "")
+            
+            logger.info(f"📡 LiveKit endpoint: {livekit_endpoint}")
+            logger.info(f"🪣 Using bucket: {HETZNER_BUCKET_NAME}")
             
             # Create S3Upload configuration for LiveKit
             req = api.RoomCompositeEgressRequest(
@@ -709,9 +714,10 @@ async def entrypoint(ctx: JobContext):
                         s3=api.S3Upload(
                             access_key=HETZNER_ACCESS_KEY,
                             secret=HETZNER_SECRET_KEY,
-                            region=os.getenv("HETZNER_REGION", "fsn1"),
-                            endpoint=HETZNER_ENDPOINT,
-                            bucket=HETZNER_BUCKET_NAME
+                            region=os.getenv("HETZNER_REGION", "hel1"),
+                            endpoint=livekit_endpoint,  # https://hel1.your-objectstorage.com
+                            bucket=HETZNER_BUCKET_NAME,
+                            force_path_style=True  # ✅ THIS IS THE KEY!
                         )
                     )
                 ],
@@ -726,36 +732,21 @@ async def entrypoint(ctx: JobContext):
             egress_resp = await lkapi.egress.start_room_composite_egress(req)
             agent.egress_id = egress_resp.egress_id
             
-            # Build recording URL (private bucket, will need presigned URL)
-            agent.recording_url = f"{HETZNER_ENDPOINT}/{HETZNER_BUCKET_NAME}/{recording_filename}"
+            # Build recording URL (use original endpoint with bucket)
+            agent.recording_url = f"{HETZNER_ENDPOINT}/{recording_filename}"
             
-            logger.info(f" Recording started (egress_id: {agent.egress_id})")
-            logger.info(f" Recording blob path: {agent.recording_blob_path}")
-            
-            # Notify backend of recording blob path
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    await client.post(
-                        f"{BACKEND_API_URL}/agent/update-call-recording",
-                        json={
-                            "call_id": ctx.room.name,
-                            "agent_id": agent_id,
-                            "recording_blob": recording_filename,
-                            "recording_url": agent.recording_url
-                        }
-                    )
-                    logger.info(f" Recording blob path sent to backend")
-            except Exception as e:
-                logger.warning(f" Could not send recording path to backend: {e}")
+            logger.info(f"✅ Recording started (egress_id: {agent.egress_id})")
+            logger.info(f"📂 Recording blob path: {agent.recording_blob_path}")
+            logger.info(f"🔗 Recording URL: {agent.recording_url}")
             
             await lkapi.aclose()
             
         except Exception as e:
-            logger.error(f" Failed to start recording: {e}")
+            logger.error(f"❌ Failed to start recording: {e}")
             traceback.print_exc()
     else:
-        logger.info(" Recording disabled")
-    
+        logger.info("🔇 Recording disabled")
+                
     # Background audio
     background_audio = BackgroundAudioPlayer(
         thinking_sound=[

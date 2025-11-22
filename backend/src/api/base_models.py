@@ -116,3 +116,10 @@ class UpdateAgentRequest(BaseModel):
                 "owner_name": "Jane Smith"
             }
         }
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(..., min_length=8)

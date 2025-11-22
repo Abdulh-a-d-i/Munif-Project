@@ -40,7 +40,6 @@ def get_s3_client():
         region_name=os.getenv("HETZNER_REGION", "hel1")
     )
 
-# Update _fetch_from_gcs_blob function
 async def _fetch_from_s3_blob(blob_name: str) -> bytes:
     """Download file from Hetzner using blob name"""
     try:
@@ -58,7 +57,6 @@ async def _fetch_from_s3_blob(blob_name: str) -> bytes:
         traceback.print_exc()
         return None
 
-# Update fetch_and_store_transcript function
 async def fetch_and_store_transcript(call_id: str, transcript_url: str = None, transcript_blob: str = None):
     """Download transcript from Hetzner blob"""
     try:
@@ -344,15 +342,34 @@ def generate_presigned_url(blob_path: str, expiration: int = 3600) -> str:
     Generate presigned URL for Hetzner object.
     
     Args:
-        blob_path: Object key in bucket (e.g., "avatars/abc.jpg")
+        blob_path: Object key in bucket (e.g., "avatars/abc.jpg" or "recordings/file.ogg")
         expiration: URL validity in seconds (default 1 hour)
     
     Returns:
         Presigned URL string
     """
     try:
-        s3_client = get_s3_client()
+        endpoint = os.getenv("HETZNER_ENDPOINT_URL")
+        access_key = os.getenv("HETZNER_ACCESS_KEY")
+        secret_key = os.getenv("HETZNER_SECRET_KEY")
         bucket_name = os.getenv("HETZNER_BUCKET_NAME")
+        
+        # 🔥 FIX: For recordings, use path-style endpoint (without bucket subdomain)
+        # For other files (avatars, transcripts), use virtual-hosted style
+        if blob_path.startswith("recordings/"):
+            # Remove bucket subdomain for path-style URLs (matches LiveKit upload)
+            endpoint_for_presign = endpoint.replace(f"{bucket_name}.", "")
+        else:
+            # Keep virtual-hosted style for transcripts and avatars
+            endpoint_for_presign = endpoint
+        
+        s3_client = boto3.client(
+            's3',
+            endpoint_url=endpoint_for_presign,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name=os.getenv("HETZNER_REGION", "hel1")
+        )
         
         url = s3_client.generate_presigned_url(
             'get_object',
@@ -365,7 +382,9 @@ def generate_presigned_url(blob_path: str, expiration: int = 3600) -> str:
         
     except Exception as e:
         logging.error(f"❌ Failed to generate presigned URL: {e}")
+        traceback.print_exc()
         return None
+
 
 
 import os
