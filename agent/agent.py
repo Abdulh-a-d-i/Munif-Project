@@ -37,7 +37,7 @@ load_dotenv(".env")
 logger = logging.getLogger("inbound-agent",)
 logger.setLevel(logging.INFO)
 # Environment variables
-BACKEND_API_URL = os.getenv("BACKEND_API_URL", "https://full-shrimp-deeply.ngrok-free.app/api")
+BACKEND_API_URL = os.getenv("BACKEND_API_URL", "https://backend.mrbot-ki.de/api")
 HETZNER_BUCKET_NAME = os.getenv("HETZNER_BUCKET_NAME")
 HETZNER_ENDPOINT = os.getenv("HETZNER_ENDPOINT_URL")
 HETZNER_ACCESS_KEY = os.getenv("HETZNER_ACCESS_KEY")
@@ -45,9 +45,8 @@ HETZNER_SECRET_KEY = os.getenv("HETZNER_SECRET_KEY")
 AGENT_API_SECRET = os.getenv("AGENT_API_SECRET")
 UPLOAD_TRANSCRIPTS = os.getenv("UPLOAD_TRANSCRIPTS", "true").lower() in ("1", "true", "yes")
 UPLOAD_RECORDINGS = os.getenv("UPLOAD_RECORDINGS", "true").lower() in ("1", "true", "yes")
-# Turn detection parameters
-TURN_DETECTION_MIN_ENDPOINTING_DELAY = float(os.getenv("TURN_DETECTION_MIN_ENDPOINTING_DELAY", "0.5"))
-TURN_DETECTION_MIN_SILENCE_DURATION = float(os.getenv("TURN_DETECTION_MIN_SILENCE_DURATION", "0.5"))
+TURN_DETECTION_MIN_ENDPOINTING_DELAY = float(os.getenv("TURN_DETECTION_MIN_ENDPOINTING_DELAY", "0.3"))  # Reduced from 0.5
+TURN_DETECTION_MIN_SILENCE_DURATION = float(os.getenv("TURN_DETECTION_MIN_SILENCE_DURATION", "0.4"))  # Reduced from 0.5
 
 VOICE_LIBRARY = {
     # English - Female
@@ -61,7 +60,7 @@ VOICE_LIBRARY = {
     "Liam Bainbridge": "6J11B050yDOLPaxMFyS9",
 
     # German - Female
-    "Lea": "M39iqBUculjyiwM5PfSy",
+    "Lea": "M39iqBUcu1jyiwM5PfSy",
     "Rebecca Green": "ONs4CSS4LR7hEoEykuS5",
     "Laura": "zKHQdbB8oaQ7roNTiDTK",
     "Ramona": "yUy9CCX9brt8aPVvIWy3",
@@ -81,7 +80,7 @@ VOICE_LIBRARY = {
     "Charles Pestel": "592QbnMQfByEAOJe8maw",
 
     # Dutch - Female
-    "Roos Dutch": "7qdUFMkIKPaaAVMsBTBt",
+    "Roos Dutch": "7qdUFMklKPaaAVMsBTBt",
     "Chira": "cPimkqmS0qNAJJNGxavl",
 
     # Dutch - Male
@@ -92,7 +91,7 @@ VOICE_LIBRARY = {
     "Giulia": "CnVVMwhKmKZ6hKBAKL6Y",
 
     # Italian - Male
-    "Marco": "200HspMHbpIu5oiMaqDy",
+    "Marco": "2OoHspMHbpIu5oiMaqDy",
     "Andy M": "DLMxnwJE0a28JQLTMJPJ",
 
     # Spanish - Female
@@ -114,12 +113,12 @@ def get_voice_id(voice_name: str) -> str:
     voice_id = VOICE_LIBRARY.get(voice_name)
     
     if voice_id:
-        logger.info(f" Using voice: {voice_name} ({voice_id})")
+        logger.info(f"✅ Using voice: {voice_name} ({voice_id})")
         return voice_id
     
-    # Fallback to Sarah
-    logger.warning(f" Voice '{voice_name}' not found, using Sarah as fallback")
-    return VOICE_LIBRARY["Sarah"]
+    # Fallback to Lea
+    logger.warning(f"⚠️ Voice '{voice_name}' not found, using Lea as fallback")
+    return VOICE_LIBRARY["Lea"]
 
 GREETINGS = {
     "en": "Hello! Thank you for calling. This is {agent_name}. How can I help you today?",
@@ -130,46 +129,85 @@ GREETINGS = {
     "es": "¡Hola! Gracias por llamar. Soy {agent_name}. ¿Cómo puedo ayudarte hoy?",
 }
 
-# Base system prompt template with rules
-BASE_SYSTEM_PROMPT_TEMPLATE = """You are {agent_name}, a professional AI voice assistant handling inbound calls.
+# 🔥 IMPROVED: Enhanced system prompt with better structure and clear instructions
+BASE_SYSTEM_PROMPT_TEMPLATE = """You are {agent_name}, a professional AI voice assistant handling inbound calls for {owner_name}.
+
+**CRITICAL RESPONSE RULES:**
+1. Respond IMMEDIATELY when the customer stops speaking - DO NOT wait
+2. Keep ALL responses SHORT (1-2 sentences maximum)
+3. Ask ONE question at a time
+4. Never use filler phrases or apologize excessively
+5. Speak naturally as if having a phone conversation
+6. Use {language} language ONLY
 
 **YOUR ROLE:**
-You are speaking to customers who have called the phone number: {phone_number}
-Language: {language}
-Industry: {industry}
-Owner: {owner_name}
+- Phone number: {phone_number}
+- Industry: {industry}
+- Language: {language}
+- You represent: {owner_name}
 
-**COMMUNICATION RULES:**
-1. Keep responses brief and conversational (1-3 sentences per response)
-2. Use natural, spoken language - avoid written formatting or bullet points
-3. Speak in {language} language at all times
-4. Be warm, professional, and helpful
-5. Listen carefully and ask clarifying questions when needed
-6. Never mention that you're an AI unless directly asked
-7. Stay focused on the caller's needs
+**CONVERSATION FLOW:**
+1. Greet warmly and ask how you can help
+2. Listen carefully to the customer's needs
+3. Provide information or help them book appointments
+4. Confirm all details clearly
+5. End politely when conversation is complete
 
-**CONVERSATION GUIDELINES:**
-- Greet callers naturally and warmly
-- Listen actively to their questions or concerns
-- Provide accurate information based on your knowledge
-- If you don't know something, admit it honestly
-- Always be polite and patient
-- End calls courteously when the conversation is complete
+**APPOINTMENT BOOKING PROCESS:**
+When a customer wants to book an appointment, follow these steps IN ORDER:
 
-**TOOL USAGE:**
-You have access to the book_appointment tool. Use this tool ONLY when the caller wants to book an appointment and you have collected all required information. Collect the necessary details first (date, start time, end time, title, notes if any). Call the tool exactly once per booking request - do not call it multiple times. After calling the tool, confirm the booking verbally based on the tool's response.
+Step 1: Ask for their preferred DATE
+   Example: "What date works best for you?"
 
-Tool: book_appointment
-Parameters (all required unless noted):
-- appointment_date: Date in YYYY-MM-DD format (e.g., 2025-11-25)
-- start_time: Start time in HH:MM 24-hour format (e.g., 14:30)
-- end_time: End time in HH:MM 24-hour format (e.g., 15:30)"""
+Step 2: Ask for their preferred TIME
+   Example: "What time would you like? Morning or afternoon?"
 
-async def _speak_status_update(ctx: RunContext, message: str, delay: float = 0.3):
+Step 3: Confirm duration or ask END TIME
+   Example: "This appointment will be one hour. Does that work?"
+
+Step 4: Ask for their FULL NAME
+   Example: "May I have your full name please?"
+
+Step 5: Ask for their EMAIL and READ IT BACK
+   Example: "What email address should I send the confirmation to?"
+   Then: "Let me confirm - that's j dot smith at gmail dot com, correct?"
+
+Step 6: Ask for their PHONE NUMBER
+   Example: "And what's the best phone number to reach you?"
+
+Step 7: ONLY AFTER collecting ALL information, call the book_appointment tool
+   Then confirm: "Perfect! I've booked your appointment for [DATE] at [TIME]. You'll receive a confirmation email at [EMAIL] shortly."
+
+**IMPORTANT APPOINTMENT RULES:**
+- Collect information ONE piece at a time
+- ALWAYS read email addresses back letter by letter (e.g., "j dot smith at gmail dot com")
+- Confirm with customer before booking
+- Only call book_appointment tool ONCE when you have ALL required information
+- If customer says "book an appointment", guide them through the process above
+
+**COMMUNICATION STYLE:**
+- Professional but warm and friendly
+- Clear and concise - no rambling
+- Patient and helpful
+- Natural phone conversation tone
+- Respond quickly - don't make customers wait
+
+**WHAT NOT TO DO:**
+- Never mention you're an AI unless asked
+- Never use bullet points or formatting
+- Never make customers repeat information unnecessarily
+- Never rush through collecting information
+- Never forget to confirm the email address by reading it back
+
+{context_from_backend}
+
+Remember: Your goal is to help customers efficiently while making them feel valued and understood."""
+
+async def _speak_status_update(ctx: RunContext, message: str, delay: float = 0.2):
     """Speak a brief status update before performing an action."""
     await asyncio.sleep(delay)
     await ctx.session.say(message, allow_interruptions=True)
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(0.1)
 
 def get_s3_client():
     """Initialize S3-compatible client for Hetzner Object Storage"""
@@ -209,11 +247,11 @@ async def send_status_to_backend(
                     json=payload
                 )
                 if response.status_code == 200:
-                    logger.info(f" Status '{status}' sent for {call_id}")
+                    logger.info(f"✅ Status '{status}' sent for {call_id}")
                     return
         except Exception as e:
             if attempt == 2:
-                logger.error(f" Failed to send status after 3 attempts: {e}")
+                logger.error(f"❌ Failed to send status after 3 attempts: {e}")
             else:
                 await asyncio.sleep(0.5)
 
@@ -222,14 +260,14 @@ async def fetch_agent_config_from_backend(phone_number: str) -> dict | None:
     Fetch agent configuration from backend API.
     """
     if not BACKEND_API_URL or not AGENT_API_SECRET:
-        logger.error(" BACKEND_API_URL or AGENT_API_SECRET not configured")
+        logger.error("❌ BACKEND_API_URL or AGENT_API_SECRET not configured")
         return None
     
     # Clean the phone number - remove any curly braces, whitespace, etc.
     phone_number = phone_number.strip().strip('{}').strip()
     
     try:
-        logger.info(f" Fetching agent config from backend for: {phone_number}")
+        logger.info(f"📞 Fetching agent config from backend for: {phone_number}")
         
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
@@ -240,26 +278,26 @@ async def fetch_agent_config_from_backend(phone_number: str) -> dict | None:
             )
             
             if response.status_code == 404:
-                logger.warning(f" No agent found for phone: {phone_number}")
+                logger.warning(f"⚠️ No agent found for phone: {phone_number}")
                 return None
             
             if response.status_code != 200:
-                logger.error(f" Backend returned {response.status_code}: {response.text}")
+                logger.error(f"❌ Backend returned {response.status_code}: {response.text}")
                 return None
             
             data = response.json()
             
             if not data.get("success"):
-                logger.error(f" Backend error: {data.get('error')}")
+                logger.error(f"❌ Backend error: {data.get('error')}")
                 return None
             
             config = data.get("agent")
             
             if not config:
-                logger.error(" No agent data in response")
+                logger.error("❌ No agent data in response")
                 return None
             
-            logger.info(f" Agent config loaded: {config['agent_name']} (ID: {config.get('agent_id', config.get('id'))})")
+            logger.info(f"✅ Agent config loaded: {config['agent_name']} (ID: {config.get('agent_id', config.get('id'))})")
             logger.info(f"   Voice type: {config.get('voice_type', 'default')}")
             logger.info(f"   Language: {config.get('language', 'en')}")
             logger.info(f"   Industry: {config.get('industry', 'N/A')}")
@@ -268,10 +306,10 @@ async def fetch_agent_config_from_backend(phone_number: str) -> dict | None:
             return config
             
     except httpx.TimeoutException:
-        logger.error(f" Timeout fetching agent config from backend")
+        logger.error(f"⏱️ Timeout fetching agent config from backend")
         return None
     except Exception as e:
-        logger.error(f" Unexpected error fetching agent config: {e}")
+        logger.error(f"❌ Unexpected error fetching agent config: {e}")
         traceback.print_exc()
         return None
 
@@ -281,14 +319,14 @@ async def initialize_call_history(phone_number: str, call_id: str) -> dict | Non
     Fetch dynamic/new data for the agent based on phone number.
     """
     if not BACKEND_API_URL or not AGENT_API_SECRET:
-        logger.error(" BACKEND_API_URL or AGENT_API_SECRET not configured")
+        logger.error("❌ BACKEND_API_URL or AGENT_API_SECRET not configured")
         return None
     
     # Clean the phone number
     phone_number = phone_number.strip().strip('{}').strip()
     
     try:
-        logger.info(f" Fetching dynamic data from backend for phone: {phone_number}")
+        logger.info(f"📊 Fetching dynamic data from backend for phone: {phone_number}")
         
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
@@ -300,34 +338,34 @@ async def initialize_call_history(phone_number: str, call_id: str) -> dict | Non
             )
             
             if response.status_code == 404:
-                logger.warning(f" No dynamic data found for phone: {phone_number}")
+                logger.warning(f"⚠️ No dynamic data found for phone: {phone_number}")
                 return None
             
             if response.status_code != 200:
-                logger.error(f" Backend returned {response.status_code}: {response.text}")
+                logger.error(f"❌ Backend returned {response.status_code}: {response.text}")
                 return None
             
             data = response.json()
             
             if not data.get("success"):
-                logger.error(f" Backend error: {data.get('error')}")
+                logger.error(f"❌ Backend error: {data.get('error')}")
                 return None
             
             dynamic_data = data.get("dynamic_data")
             
             if not dynamic_data:
-                logger.info(" No dynamic data available")
+                logger.info("ℹ️ No dynamic data available")
                 return None
             
-            logger.info(f" Dynamic data loaded: {json.dumps(dynamic_data)[:100]}...")
+            logger.info(f"✅ Dynamic data loaded")
             
             return dynamic_data
             
     except httpx.TimeoutException:
-        logger.error(f" Timeout fetching dynamic data from backend")
+        logger.error(f"⏱️ Timeout fetching dynamic data from backend")
         return None
     except Exception as e:
-        logger.error(f" Unexpected error fetching dynamic data: {e}")
+        logger.error(f"❌ Unexpected error fetching dynamic data: {e}")
         traceback.print_exc()
         return None
 
@@ -349,7 +387,7 @@ def build_complete_system_prompt(
         language=language.upper(),
         industry=industry or "General",
         owner_name=owner_name or "the company",
-        context_from_backend=context_from_backend or "No additional context provided.",
+        context_from_backend=context_from_backend or "",
     )
     
     return complete_prompt
@@ -376,7 +414,7 @@ class InboundAgent(Agent):
             context_from_backend=context_from_backend
         )
         
-        logger.info(f" Initializing agent '{self.agent_name}'")
+        logger.info(f"🤖 Initializing agent '{self.agent_name}'")
         logger.info(f"   Language: {self.language}")
         logger.info(f"   Industry: {self.industry}")
         logger.info(f"   Complete prompt length: {len(complete_system_prompt)} chars")
@@ -399,6 +437,8 @@ class InboundAgent(Agent):
    
     def set_caller_phone(self, phone: str):
         self.caller_phone = phone
+    
+    # 🔥 FIXED: Improved appointment booking with email confirmation
     @function_tool()
     async def book_appointment(
             self,
@@ -406,82 +446,90 @@ class InboundAgent(Agent):
             appointment_date: str,
             start_time: str,
             end_time: str,
-            attendee_name: str = "Service Provider",
+            customer_name: str,
+            customer_email: str,
+            customer_phone: str = None,
             title: str = "Appointment",
-            notes: str | None = None,
-            customer_name: str | None = None,
-            customer_email: str | None = None,
-            customer_phone: str | None = None
+            notes: str = None
         ):
             """
-            Book an appointment and send confirmation email + calendar invite.
-            Use this when the caller wants to schedule an appointment.
+            Book an appointment and send confirmation email.
+            ONLY call this function when you have collected ALL required information from the customer.
+            
+            REQUIRED information you MUST collect before calling this:
+            - appointment_date: Date in YYYY-MM-DD format (e.g., 2025-12-15)
+            - start_time: Start time in HH:MM 24-hour format (e.g., 14:30)
+            - end_time: End time in HH:MM 24-hour format (e.g., 15:30)
+            - customer_name: Full name of the customer
+            - customer_email: Email address (MUST read back to customer for confirmation)
+            - customer_phone: Phone number
             
             Args:
-                appointment_date: Date in YYYY-MM-DD format (e.g., 2025-11-25)
-                start_time: Start time in HH:MM 24-hour format (e.g., 14:30)
-                end_time: End time in HH:MM 24-hour format (e.g., 15:30)
-                attendee_name: Name of the business/person the appointment is with
+                appointment_date: Date in YYYY-MM-DD format
+                start_time: Start time in HH:MM 24-hour format
+                end_time: End time in HH:MM 24-hour format
+                customer_name: Full name of the person booking
+                customer_email: Email to send confirmation to (MUST be confirmed with customer)
+                customer_phone: Phone number of the customer
                 title: Title of the appointment
                 notes: Any special requests or notes
-                customer_name: Name of the person booking (caller)
-                customer_email: Email to send confirmation to
-                customer_phone: Phone number of the customer
             """
-            await _speak_status_update(ctx, "Perfect, one moment while I book that for you...")
+            await _speak_status_update(ctx, "Perfect! Let me book that for you now...")
 
             try:
-                logger.info(f" Booking appointment via backend API: {appointment_date} {start_time}-{end_time}")
+                logger.info(f"📅 Booking appointment: {appointment_date} {start_time}-{end_time}")
+                logger.info(f"   Customer: {customer_name} ({customer_email})")
 
                 payload = {
-                    "user_id": self.agent_id,  # or however your backend identifies the business/agent
+                    "user_id": self.agent_id,
                     "appointment_date": appointment_date,
                     "start_time": start_time,
                     "end_time": end_time,
-                    "attendee_name": attendee_name or self.agent_name,
+                    "attendee_name": self.agent_name,
                     "title": title,
-                    "description": notes or "",
+                    "description": notes or f"Appointment scheduled via phone call",
                     "organizer_name": self.agent_name,
-                    "organizer_email": None,  # optional: your business email
-                    "customer_name": customer_name or "Customer",
+                    "organizer_email": customer_email,
+                    "customer_name": customer_name,
                     "customer_email": customer_email,
                     "customer_phone": customer_phone or self.caller_phone
                 }
 
                 async with httpx.AsyncClient(timeout=20.0) as client:
                     response = await client.post(
-                        f"{BACKEND_API_URL}/api/agent/book-appointment",
+                        f"{BACKEND_API_URL}/agent/book-appointment",
                         json=payload,
-                        headers={"Authorization": f"Bearer {AGENT_API_SECRET}"}  # if needed
+                        headers={"Authorization": f"Bearer {AGENT_API_SECRET}"}
                     )
 
-                    logger.info(f" Booking response: {response.status_code} {response.text}")
+                    logger.info(f"📬 Booking response: {response.status_code}")
 
                     if response.status_code in (200, 201):
                         data = response.json()
                         if data.get("success"):
                             return {
                                 "success": True,
-                                "message": f"Appointment confirmed for {appointment_date} at {start_time}! "
-                                        f"A confirmation email has been sent to {customer_email or 'you'}."
+                                "message": f"Your appointment is confirmed for {appointment_date} at {start_time}. "
+                                        f"A confirmation email has been sent to {customer_email}."
                             }
 
-                    # Even if not success, return friendly message
+                    # Handle errors
                     msg = response.json().get("message", "There was an issue booking the appointment.")
                     return {"success": False, "message": msg}
 
             except Exception as e:
-                logger.error(f" Error booking appointment: {e}")
+                logger.error(f"❌ Error booking appointment: {e}")
                 traceback.print_exc()
                 return {
                     "success": False,
-                    "message": "I'm having trouble connecting to the booking system right now. "
-                            "Could you please call back in a few minutes?"
+                    "message": "I'm having trouble with the booking system right now. "
+                            "Could you please call back in a few minutes or try again?"
                 }
+    
     @function_tool()
     async def end_call(self, ctx: RunContext):
         """End the phone call politely and hang up. Use this when the conversation is complete."""
-        logger.info(" Ending call...")
+        logger.info("📞 Ending call...")
         try:
             await ctx.wait_for_playout()
         except:
@@ -490,10 +538,10 @@ class InboundAgent(Agent):
         if job_ctx:
             try:
                 await job_ctx.api.room.delete_room(api.DeleteRoomRequest(room=job_ctx.room.name))
-                logger.info(" Room deleted")
+                logger.info("🗑️ Room deleted")
                 await send_status_to_backend(job_ctx.room.name, "completed", self.agent_id)
             except Exception as e:
-                logger.warning(f" Failed to delete room: {e}")
+                logger.warning(f"⚠️ Failed to delete room: {e}")
         
         try:
             ctx.shutdown(reason="Call ended by agent")
@@ -503,7 +551,7 @@ class InboundAgent(Agent):
 async def entrypoint(ctx: JobContext):
     """Entrypoint for inbound calls with voice name support."""
     logger.info("=" * 80)
-    logger.info(f" INBOUND CALL - Room: {ctx.room.name}")
+    logger.info(f"📞 INBOUND CALL - Room: {ctx.room.name}")
     logger.info("=" * 80)
     
     # Connect first to get participants
@@ -514,20 +562,19 @@ async def entrypoint(ctx: JobContext):
     caller_number = 'unknown'
     
     # Wait for SIP participant to join
-    logger.info(" Waiting for SIP participant...")
+    logger.info("⏳ Waiting for SIP participant...")
     max_wait = 5
     waited = 0
     
     while waited < max_wait:
         for participant in ctx.room.remote_participants.values():
             if hasattr(participant, 'attributes'):
-                logger.info(f" Participant attributes: {dict(participant.attributes)}")
+                logger.info(f"📋 Participant attributes: {dict(participant.attributes)}")
                 
                 # Get the called number (the number being dialed - DNIS)
                 called_number = participant.attributes.get('sip.trunkPhoneNumber', 'unknown')
                 
                 # Get the caller number (the number calling - ANI)
-                # This might be in different attributes depending on your setup
                 caller_number = (
                     participant.attributes.get('sip.fromNumber') or
                     participant.attributes.get('sip.callerNumber') or
@@ -551,11 +598,11 @@ async def entrypoint(ctx: JobContext):
     phone_number = called_number
 
     if not phone_number or phone_number == 'unknown':
-        logger.error(" Missing phone_number - cannot determine agent")
+        logger.error("❌ Missing phone_number - cannot determine agent")
         return
 
-    logger.info(f" Using phone number: {phone_number}")
-    logger.info(f" Caller number: {caller_number}")
+    logger.info(f"✅ Using phone number: {phone_number}")
+    logger.info(f"✅ Caller number: {caller_number}")
 
     # Start parallel async tasks
     config_task = asyncio.create_task(fetch_agent_config_from_backend(phone_number))
@@ -565,7 +612,7 @@ async def entrypoint(ctx: JobContext):
     agent_config = await config_task
     
     if not agent_config:
-        logger.error(f" No agent configured for phone number: {phone_number}")
+        logger.error(f"❌ No agent configured for phone number: {phone_number}")
         return
     
     # Await the dynamic data task
@@ -576,37 +623,47 @@ async def entrypoint(ctx: JobContext):
     agent_id = agent_config.get("agent_id") or agent_config.get("id")
     
     # Get voice name from config
-    voice_name = agent_config.get("voice_type", "Sarah")
+    voice_name = agent_config.get("voice_type", "Lea")
     
+    # 🔥 FIXED: Get the correct voice ID
     voice_id = get_voice_id(voice_name)
     
-    logger.info(f" Voice name: {voice_name}")
-    logger.info(f" Voice ID: {voice_id}")
-    logger.info(f" Language: {language}")
-    logger.info(f" Agent ID: {agent_id}")
+    logger.info(f"🎤 Voice name: {voice_name}")
+    logger.info(f"🎤 Voice ID: {voice_id}")
+    logger.info(f"🌐 Language: {language}")
+    logger.info(f"🆔 Agent ID: {agent_id}")
     
     # Create agent with complete prompt
     agent = InboundAgent(agent_config=agent_config)
     agent.set_caller_phone(caller_number)
     
+    # 🔥 IMPROVED: Better turn detection
     turn_detector = MultilingualModel()
     
-    # Configure session
+    # 🔥 FIXED: Use the correct voice_id instead of hardcoded one
     session = AgentSession(
         llm=openai.LLM(
-            model="gpt-4.1-mini",
-            api_key=os.getenv("OPENAI_API_KEY")
+            model="gpt-4o-mini",
+            api_key=os.getenv("OPENAI_API_KEY"),
+            temperature=0.7,  # More natural responses
         ),
         stt=deepgram.STT(
             api_key=os.getenv("DEEPGRAM_API_KEY"),
-            model="nova-3",
+            model="nova-2-general",  # Better speech recognition
+            language=language,
         ),
         tts=elevenlabs.TTS(
             api_key=os.getenv("ELEVENLABS_API_KEY"),
             model="eleven_flash_v2_5",
-            voice_id= voice_id,
+            voice_id=voice_id,  # 🔥 FIXED: Use configured voice_id instead of hardcoded
+            optimize_streaming_latency=4,  # Reduce latency
+            stability=0.5,
+            similarity_boost=0.75,
         ),
-        vad=silero.VAD.load(min_silence_duration=0.05),
+        vad=silero.VAD.load(
+            min_silence_duration=0.3,  # More responsive
+            min_speech_duration=0.1,
+        ),
         turn_detection=turn_detector,
         min_endpointing_delay=TURN_DETECTION_MIN_ENDPOINTING_DELAY,
     )
@@ -747,13 +804,6 @@ async def entrypoint(ctx: JobContext):
     else:
         logger.info("🔇 Recording disabled")
                 
-    # Background audio
-    background_audio = BackgroundAudioPlayer(
-        thinking_sound=[
-            AudioConfig(BuiltinAudioClip.OFFICE_AMBIENCE, volume=0.5),
-        ],
-    )
-    await background_audio.start(room=ctx.room, agent_session=session)
     
     try:
         #  WAIT FOR CALLER TO CONNECT 

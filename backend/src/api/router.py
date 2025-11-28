@@ -1154,7 +1154,7 @@ async def forgot_password(request: ForgotPasswordRequest):
         from src.utils.jwt_utils import create_password_reset_token
         reset_token = create_password_reset_token(email)
         
-        frontend_url = os.getenv("FRONTEND_URL", "https://munif-agent.vercel.app")
+        frontend_url = os.getenv("FRONTEND_URL", "https://www.mrbot-ki.de")
         mail_obj = Send_Mail()  
         email_sent = await mail_obj.send_password_reset_email(email, reset_token, frontend_url)
         
