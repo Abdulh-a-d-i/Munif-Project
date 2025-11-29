@@ -521,23 +521,49 @@ async def get_agent_call_history(
 
 @router.get("/agent/config/{phone_number}")
 async def get_agent_config(phone_number: str):
-    """Fetch agent configuration by phone number"""
+    """
+    Fetch agent configuration by phone number.
+    ✅ Checks minutes availability - blocks if exhausted.
+    ❌ Does NOT send minutes info to agent (security)
+    """
     try:
         agent = db.get_agent_by_phone(phone_number)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         
+        # 🔥 Check if agent has available minutes
+        agent_id = agent.get("agent_id")
+        minutes_check = db.check_agent_minutes_available(agent_id)
+        
+        # ❌ Block if no minutes remaining
+        if not minutes_check["available"]:
+            logging.warning(
+                f"⛔ Agent {agent_id} ({phone_number}): "
+                f"No minutes remaining ({minutes_check['used_minutes']}/{minutes_check['allowed_minutes']})"
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Agent minutes exhausted"
+            )
+        
+        # ✅ Minutes available - send config WITHOUT minutes info
+        logging.info(
+            f"✅ Agent {agent_id} config sent - "
+            f"{minutes_check['remaining_minutes']:.1f} minutes remaining"
+        )
+        
         return JSONResponse({
             "success": True,
             "agent": agent
         })
+        
     except HTTPException:
         raise
     except Exception as e:
         logging.error(f"Error fetching agent config: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 @router.get("/agent/new-call")
 async def new_call(phone_number: str = Query(...), call_id: str = Query(...)):
     """Initialize call history record"""
@@ -565,15 +591,29 @@ async def new_call(phone_number: str = Query(...), call_id: str = Query(...)):
     
 @router.get("/analytics")
 async def get_dashboard_analytics(current_user: dict = Depends(get_current_user)):
-    """Get overall dashboard analytics"""
+    """
+    Get overall dashboard analytics.
+    ✅ Now includes minutes info for top agents.
+    """
     try:
         user_id = current_user["id"]
         analytics = db.get_admin_dashboard_analytics(user_id)
         
-        # 🔥 ADD PRESIGNED URLS TO TOP AGENTS
+        # 🔥 ADD MINUTES INFO TO TOP AGENTS
         for agent in analytics.get("top_agents", []):
+            # Add presigned URLs
             if agent.get("avatar_url"):
                 agent["avatar_presigned_url"] = generate_presigned_url(agent["avatar_url"], expiration=86400)
+            
+            # Add minutes info
+            agent_id = agent.get("id")
+            minutes_check = db.check_agent_minutes_available(agent_id)
+            agent["minutes_info"] = {
+                "allowed_minutes": minutes_check["allowed_minutes"],
+                "used_minutes": minutes_check["used_minutes"],
+                "remaining_minutes": minutes_check["remaining_minutes"],
+                "can_accept_calls": minutes_check["available"]
+            }
         
         return JSONResponse(
             status_code=200,
@@ -585,6 +625,7 @@ async def get_dashboard_analytics(current_user: dict = Depends(get_current_user)
     except Exception as e:
         logging.error(f"Error fetching dashboard analytics: {e}")
         return error_response("Failed to fetch analytics", 500)
+    
 
 @router.get("/agents")
 async def get_all_agents(
@@ -592,14 +633,33 @@ async def get_all_agents(
     page_size: int = Query(5, ge=1, le=100),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get paginated list of all agents with call statistics"""
+    """
+    Get paginated list of all agents with call statistics.
+    ✅ Now includes minutes info for each agent.
+    """
     try:
         user_id = current_user["id"]
         result = db.get_agents_with_call_stats(user_id, page, page_size)
         
-        # 🔥 ADD PRESIGNED URLS TO ALL AGENTS
+        # 🔥 NEW: Add minutes info to each agent
         for agent in result.get("agents", []):
+            # Add presigned URLs
             add_presigned_urls_to_agent(agent)
+            
+            # Add minutes info
+            agent_id = agent.get("id")
+            minutes_check = db.check_agent_minutes_available(agent_id)
+            agent["minutes_info"] = {
+                "allowed_minutes": minutes_check["allowed_minutes"],
+                "used_minutes": minutes_check["used_minutes"],
+                "remaining_minutes": minutes_check["remaining_minutes"],
+                "percentage_used": round(
+                    (minutes_check["used_minutes"] / minutes_check["allowed_minutes"] * 100) 
+                    if minutes_check["allowed_minutes"] > 0 else 0, 
+                    1
+                ),
+                "can_accept_calls": minutes_check["available"]
+            }
         
         return JSONResponse(
             status_code=200,
@@ -619,7 +679,10 @@ async def get_agent_detail(
     calls_page_size: int = Query(10, ge=1, le=100),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get detailed agent information with paginated call history"""
+    """
+    Get detailed agent information with paginated call history.
+     Now includes minutes usage info.
+    """
     try:
         user_id = current_user["id"]
         agent_detail = db.get_agent_detail_with_calls(
@@ -629,10 +692,24 @@ async def get_agent_detail(
         if not agent_detail:
             return error_response("Agent not found", 404)
         
-        # 🔥 ADD PRESIGNED URL TO AGENT
+        #  NEW: Add minutes info
+        minutes_check = db.check_agent_minutes_available(agent_id)
+        agent_detail["minutes_info"] = {
+            "allowed_minutes": minutes_check["allowed_minutes"],
+            "used_minutes": minutes_check["used_minutes"],
+            "remaining_minutes": minutes_check["remaining_minutes"],
+            "percentage_used": round(
+                (minutes_check["used_minutes"] / minutes_check["allowed_minutes"] * 100) 
+                if minutes_check["allowed_minutes"] > 0 else 0, 
+                1
+            ),
+            "can_accept_calls": minutes_check["available"]
+        }
+        
+        # Add presigned URL to agent
         add_presigned_urls_to_agent(agent_detail)
         
-        # 🔥 ADD PRESIGNED URLS TO CALLS
+        # Add presigned URLs to calls
         for call in agent_detail.get("calls", {}).get("data", []):
             add_presigned_urls_to_call(call)
         
@@ -646,6 +723,7 @@ async def get_agent_detail(
     except Exception as e:
         logging.error(f"Error fetching agent detail: {e}")
         return error_response("Failed to fetch agent details", 500)
+    
 
 @router.post("/agents")
 async def create_agent(
@@ -656,10 +734,17 @@ async def create_agent(
     language: str = Form("en"),
     industry: str = Form(None),
     owner_name: str = Form(None),
+    owner_email: str = Form(None),  # NEW
+    business_hours_start: str = Form(None),  # NEW (format: "09:00")
+    business_hours_end: str = Form(None),    # NEW (format: "17:00")
+    allowed_minutes: int = Form(0),          # NEW
     avatar: UploadFile = File(None),
     current_user: dict = Depends(get_current_user)
 ):
-    """Create a new agent with optional avatar image"""
+    """
+    Create a new agent with optional avatar image.
+    ✅ Now includes owner_email, business_hours, and allowed_minutes.
+    """
     try:
         user_id = current_user["id"]
         
@@ -668,10 +753,29 @@ async def create_agent(
         if existing:
             return error_response("Phone number already in use", 400)
         
+        # Validate business hours format if provided
+        if business_hours_start or business_hours_end:
+            if not (business_hours_start and business_hours_end):
+                return error_response(
+                    "Both business_hours_start and business_hours_end must be provided", 
+                    400
+                )
+            
+            # Simple HH:MM validation
+            import re
+            time_pattern = r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$'
+            if not re.match(time_pattern, business_hours_start):
+                return error_response("Invalid business_hours_start format. Use HH:MM", 400)
+            if not re.match(time_pattern, business_hours_end):
+                return error_response("Invalid business_hours_end format. Use HH:MM", 400)
+        
+        # Validate allowed_minutes
+        if allowed_minutes < 0:
+            return error_response("allowed_minutes cannot be negative", 400)
+        
         # Upload avatar if provided
-        avatar_key = None  # Store OBJECT KEY, not URL
+        avatar_key = None
         if avatar and avatar.filename:
-            # Validate file
             allowed_extensions = {'jpg', 'jpeg', 'png', 'gif', 'webp'}
             file_extension = avatar.filename.split('.')[-1].lower()
             
@@ -681,12 +785,10 @@ async def create_agent(
                     400
                 )
             
-            # Validate file size (max 5MB)
             content = await avatar.read()
             if len(content) > 5 * 1024 * 1024:
                 return error_response("File too large. Maximum size: 5MB", 400)
             
-            # Upload to Hetzner
             try:
                 avatar_key = hetzner_storage.upload_avatar(content, file_extension)
                 logging.info(f"✅ Avatar uploaded with key: {avatar_key}")
@@ -703,7 +805,11 @@ async def create_agent(
             "language": language,
             "industry": industry,
             "owner_name": owner_name,
-            "avatar_url": avatar_key,  # Store OBJECT KEY (e.g., "avatars/uuid.jpg")
+            "owner_email": owner_email,  # NEW
+            "avatar_url": avatar_key,
+            "business_hours_start": business_hours_start,  # NEW
+            "business_hours_end": business_hours_end,      # NEW
+            "allowed_minutes": allowed_minutes,            # NEW
             "admin_id": user_id
         }
         
@@ -716,7 +822,7 @@ async def create_agent(
         if agent.get("updated_at"):
             agent["updated_at"] = agent["updated_at"].isoformat()
         
-        # 🔥 ADD PRESIGNED URL FOR RESPONSE
+        # Add presigned URL for response
         add_presigned_urls_to_agent(agent)
         
         return JSONResponse(
@@ -745,10 +851,18 @@ async def update_agent(
     language: str = Form(None),
     industry: str = Form(None),
     owner_name: str = Form(None),
+    owner_email: str = Form(None),  # NEW
+    business_hours_start: str = Form(None),  # NEW
+    business_hours_end: str = Form(None),    # NEW
+    allowed_minutes: int = Form(None),       # NEW
     avatar: UploadFile = File(None),
     current_user: dict = Depends(get_current_user)
 ):
-    """Update agent details with optional new avatar"""
+    """
+    Update agent details with optional new avatar.
+    ✅ Now includes owner_email, business_hours, and allowed_minutes.
+    Note: used_minutes cannot be updated here - use reset endpoint instead.
+    """
     try:
         user_id = current_user["id"]
         
@@ -773,6 +887,25 @@ async def update_agent(
             updates["industry"] = industry
         if owner_name is not None:
             updates["owner_name"] = owner_name
+        if owner_email is not None:  # NEW
+            updates["owner_email"] = owner_email
+        if business_hours_start is not None:  # NEW
+            updates["business_hours_start"] = business_hours_start
+        if business_hours_end is not None:    # NEW
+            updates["business_hours_end"] = business_hours_end
+        if allowed_minutes is not None:       # NEW
+            if allowed_minutes < 0:
+                return error_response("allowed_minutes cannot be negative", 400)
+            updates["allowed_minutes"] = allowed_minutes
+        
+        # Validate business hours if both provided
+        if "business_hours_start" in updates and "business_hours_end" in updates:
+            import re
+            time_pattern = r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$'
+            if not re.match(time_pattern, updates["business_hours_start"]):
+                return error_response("Invalid business_hours_start format", 400)
+            if not re.match(time_pattern, updates["business_hours_end"]):
+                return error_response("Invalid business_hours_end format", 400)
         
         # Handle avatar upload
         if avatar and avatar.filename:
@@ -790,7 +923,6 @@ async def update_agent(
                 return error_response("File too large. Maximum size: 5MB", 400)
             
             try:
-                # Upload new avatar
                 new_avatar_key = hetzner_storage.upload_avatar(content, file_extension)
                 
                 # Delete old avatar if exists
@@ -820,7 +952,7 @@ async def update_agent(
         if result.get("updated_at"):
             result["updated_at"] = result["updated_at"].isoformat()
         
-        # 🔥 ADD PRESIGNED URL
+        # Add presigned URL
         add_presigned_urls_to_agent(result)
         
         return JSONResponse(
@@ -838,7 +970,6 @@ async def update_agent(
         logging.error(f"Error updating agent: {e}")
         traceback.print_exc()
         return error_response("Failed to update agent", 500)
-    
 
 @router.delete("/agents/{agent_id}")
 async def delete_agent(
@@ -925,7 +1056,6 @@ async def get_call_details(
         traceback.print_exc()  # Add this to see full error
         return error_response("Failed to fetch call details", 500)
 
-# ==================== LIVEKIT WEBHOOK ====================
 @router.post("/livekit-webhook")
 async def livekit_webhook(request: Request):
     """Handle LiveKit events for call lifecycle"""
@@ -958,7 +1088,7 @@ async def livekit_webhook(request: Request):
             try:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT status, events_log, started_at, created_at
+                        SELECT status, events_log, started_at, created_at, agent_id
                         FROM call_history WHERE call_id = %s
                     """, (call_id,))
                     row = cursor.fetchone()
@@ -968,7 +1098,7 @@ async def livekit_webhook(request: Request):
             if not row:
                 return JSONResponse({"message": "Call not found"})
 
-            current_status, events_log, db_started_at, created_at = row
+            current_status, events_log, db_started_at, created_at, agent_id = row
             
             # Skip if already final
             if current_status in {"completed", "unanswered"}:
@@ -981,6 +1111,18 @@ async def livekit_webhook(request: Request):
                     "duration": max(0, duration),
                     "ended_at": ended
                 })
+                
+                # 🔥 NEW: Update agent's used_minutes
+                if agent_id and duration > 0:
+                    duration_minutes = duration / 60
+                    try:
+                        db.update_agent_used_minutes(agent_id, duration_minutes)
+                        logging.info(
+                            f"✅ Agent {agent_id} minutes updated: +{duration_minutes:.2f} min"
+                        )
+                    except Exception as e:
+                        logging.error(f"❌ Failed to update agent minutes: {e}")
+                
                 return JSONResponse({"message": "Duration updated"})
 
             # Determine final status
@@ -997,6 +1139,18 @@ async def livekit_webhook(request: Request):
                 "ended_at": ended,
                 "started_at": started
             })
+            
+            # 🔥 NEW: Update agent's used_minutes ONLY if call was completed
+            if agent_id and final_status == "completed" and duration > 0:
+                duration_minutes = duration / 60
+                try:
+                    db.update_agent_used_minutes(agent_id, duration_minutes)
+                    logging.info(
+                        f"✅ Agent {agent_id} minutes updated: +{duration_minutes:.2f} min "
+                        f"(call {call_id})"
+                    )
+                except Exception as e:
+                    logging.error(f"❌ Failed to update agent minutes: {e}")
             
             return JSONResponse({"message": f"Call ended: {final_status}"})
 
@@ -1019,7 +1173,6 @@ async def livekit_webhook(request: Request):
         traceback.print_exc()
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# ==================== OWNER FILTER ====================
 @router.get("/agents/by-owner/{owner_name}")
 async def get_agents_by_owner(
     owner_name: str,
@@ -1056,77 +1209,85 @@ async def get_agents_by_owner(
         return error_response("Failed to fetch agents by owner", 500)
     
 
-
 @router.post("/agent/book-appointment")
 async def book_appointment(request: Request):
     """
-    API for LiveKit agent to book an appointment
+    API for LiveKit agent to book an appointment.
+    ✅ Sends confirmation emails to BOTH customer AND owner.
     """
     try:
         data = await request.json()
         
-        user_id = data.get("user_id")
+        user_id = data.get("user_id")  # This is agent_id
         appointment_date = data.get("appointment_date") 
         start_time = data.get("start_time")
         end_time = data.get("end_time")
-        attendee_name = data.get("attendee_name", "Valued Customer")
+        customer_name = data.get("customer_name", "Valued Customer")
+        customer_email = data.get("customer_email")
+        customer_phone = data.get("customer_phone")
         title = data.get("title", "Appointment")
         description = data.get("description", "")
         organizer_name = data.get("organizer_name")
-        organizer_email = data.get("organizer_email")
         
-        if not all([user_id, appointment_date, start_time, end_time, organizer_email]):
+        if not all([user_id, appointment_date, start_time, end_time, customer_email]):
             return error_response("Missing required fields", status_code=400)
         
-        has_conflict = db.check_appointment_conflict(
-            user_id=user_id,
-            appointment_date=appointment_date,
-            start_time=start_time,
-            end_time=end_time
-        )
+        # Get agent details to fetch owner_email
+        agent = db.get_agent_by_id(user_id)
+        if not agent:
+            return error_response("Agent not found", status_code=404)
         
-        if has_conflict:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "success": False,
-                    "message": "Time slot already booked",
-                    "conflict": True
-                }
-            )
+        owner_email = agent.get("owner_email")
+        owner_name = agent.get("owner_name", "Business Owner")
         
-        appointment_id = db.create_appointment(
-            user_id=user_id,
-            appointment_date=appointment_date,
-            start_time=start_time,
-            end_time=end_time,
-            attendee_name=attendee_name,
-            attendee_email=organizer_email,
-            title=title,
-            description=description
-        )
-        
-        email_sent = await mail_obj.send_email_with_calendar_event(
-            attendee_email=organizer_email,
-            attendee_name=organizer_name,
+        # Send email to CUSTOMER
+        customer_email_sent = await mail_obj.send_email_with_calendar_event(
+            attendee_email=customer_email,
+            attendee_name=customer_name,
             appointment_date=appointment_date,
             start_time=start_time,
             end_time=end_time,
             title=title,
             description=description,
-            organizer_name=organizer_name,
-            organizer_email=organizer_email
+            organizer_name=organizer_name or owner_name,
+            organizer_email=owner_email or customer_email
         )
+        
+        # 🔥 Send email to OWNER (using dedicated function)
+        owner_email_sent = False
+        if owner_email:
+            owner_email_sent = await mail_obj.send_owner_appointment_notification(
+                owner_email=owner_email,
+                owner_name=owner_name,
+                customer_name=customer_name,
+                customer_email=customer_email,
+                customer_phone=customer_phone,
+                appointment_date=appointment_date,
+                start_time=start_time,
+                end_time=end_time,
+                title=title,
+                description=description
+            )
+            
+            logging.info(
+                f"📧 Appointment emails sent - "
+                f"Customer: {customer_email_sent}, Owner: {owner_email_sent}"
+            )
+        else:
+            logging.warning(f"⚠️ No owner_email for agent {user_id}, skipping owner notification")
         
         return JSONResponse({
             "success": True,
-            "appointment_id": appointment_id,
-            "email_sent": email_sent,
-            "message": "Appointment booked successfully"
+            "message": "Appointment booked successfully",
+            "emails_sent": {
+                "customer": customer_email_sent,
+                "owner": owner_email_sent
+            }
         })
         
     except Exception as e:
         logging.error(f"Error booking appointment: {e}")
+        traceback.print_exc()
         return error_response(f"Failed to book appointment: {str(e)}", status_code=500)
     
 
@@ -1194,111 +1355,111 @@ async def reset_password(request: ResetPasswordRequest):
         traceback.print_exc()
         return error_response("Failed to reset password", 500)
     
-@router.post("/admin/migrate-voices-from-json")
-async def migrate_voices_from_json(
-    voices_json: UploadFile = File(..., description="JSON file with voice data"),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    MIGRATION ENDPOINT: Import voice samples from JSON export.
+# @router.post("/admin/migrate-voices-from-json")
+# async def migrate_voices_from_json(
+#     voices_json: UploadFile = File(..., description="JSON file with voice data"),
+#     current_user: dict = Depends(get_current_user)
+# ):
+#     """
+#     MIGRATION ENDPOINT: Import voice samples from JSON export.
     
-    Expected JSON format (array of objects):
-    [
-        {
-            "voice_name": "Emma",
-            "voice_id": "56bWURjYFHyYyVf490Dp",
-            "language": "en",
-            "country_code": "US",
-            "gender": "female",
-            "audio_blob_path": "voice_samples/56bWURjYFHyYyVf490Dp.mp3",
-            "duration_seconds": null
-        },
-        ...
-    ]
+#     Expected JSON format (array of objects):
+#     [
+#         {
+#             "voice_name": "Emma",
+#             "voice_id": "56bWURjYFHyYyVf490Dp",
+#             "language": "en",
+#             "country_code": "US",
+#             "gender": "female",
+#             "audio_blob_path": "voice_samples/56bWURjYFHyYyVf490Dp.mp3",
+#             "duration_seconds": null
+#         },
+#         ...
+#     ]
     
-    This will:
-    1. Parse the JSON file
-    2. Insert all records into voice_samples table
-    3. Skip duplicates (based on voice_id)
-    """
-    import logging
-    logger = logging.getLogger(__name__)
+#     This will:
+#     1. Parse the JSON file
+#     2. Insert all records into voice_samples table
+#     3. Skip duplicates (based on voice_id)
+#     """
+#     import logging
+#     logger = logging.getLogger(__name__)
     
-    try:
-        logger.info("📥 Starting voice migration from JSON...")
+#     try:
+#         logger.info("📥 Starting voice migration from JSON...")
         
-        # Read and parse JSON
-        content = await voices_json.read()
-        voices_data = json.loads(content.decode('utf-8'))
+#         # Read and parse JSON
+#         content = await voices_json.read()
+#         voices_data = json.loads(content.decode('utf-8'))
         
-        if not isinstance(voices_data, list):
-            return error_response("Invalid JSON format. Expected array of voice objects.", 400)
+#         if not isinstance(voices_data, list):
+#             return error_response("Invalid JSON format. Expected array of voice objects.", 400)
         
-        logger.info(f"📋 Found {len(voices_data)} voice records in JSON")
+#         logger.info(f"📋 Found {len(voices_data)} voice records in JSON")
         
-        # Validate required fields
-        required_fields = ['voice_name', 'voice_id', 'language', 'country_code', 'gender', 'audio_blob_path']
+#         # Validate required fields
+#         required_fields = ['voice_name', 'voice_id', 'language', 'country_code', 'gender', 'audio_blob_path']
         
-        inserted_count = 0
-        skipped_count = 0
-        failed = []
+#         inserted_count = 0
+#         skipped_count = 0
+#         failed = []
         
-        for idx, voice in enumerate(voices_data, 1):
-            try:
-                # Validate fields
-                missing_fields = [field for field in required_fields if field not in voice]
-                if missing_fields:
-                    logger.warning(f"⚠️ Record {idx}: Missing fields {missing_fields}, skipping")
-                    failed.append(f"{voice.get('voice_name', 'Unknown')}: Missing {missing_fields}")
-                    continue
+#         for idx, voice in enumerate(voices_data, 1):
+#             try:
+#                 # Validate fields
+#                 missing_fields = [field for field in required_fields if field not in voice]
+#                 if missing_fields:
+#                     logger.warning(f"⚠️ Record {idx}: Missing fields {missing_fields}, skipping")
+#                     failed.append(f"{voice.get('voice_name', 'Unknown')}: Missing {missing_fields}")
+#                     continue
                 
-                # Insert into database
-                db.insert_voice_sample({
-                    'voice_name': voice['voice_name'],
-                    'voice_id': voice['voice_id'],
-                    'language': voice['language'],
-                    'country_code': voice['country_code'],
-                    'gender': voice['gender'],
-                    'audio_blob_path': voice['audio_blob_path'],
-                    'duration_seconds': voice.get('duration_seconds')
-                })
+#                 # Insert into database
+#                 db.insert_voice_sample({
+#                     'voice_name': voice['voice_name'],
+#                     'voice_id': voice['voice_id'],
+#                     'language': voice['language'],
+#                     'country_code': voice['country_code'],
+#                     'gender': voice['gender'],
+#                     'audio_blob_path': voice['audio_blob_path'],
+#                     'duration_seconds': voice.get('duration_seconds')
+#                 })
                 
-                inserted_count += 1
-                logger.info(f"✅ [{idx}/{len(voices_data)}] Inserted: {voice['voice_name']} ({voice['voice_id']})")
+#                 inserted_count += 1
+#                 logger.info(f"✅ [{idx}/{len(voices_data)}] Inserted: {voice['voice_name']} ({voice['voice_id']})")
                 
-            except Exception as e:
-                error_msg = str(e)
-                if 'duplicate key' in error_msg.lower() or 'unique constraint' in error_msg.lower():
-                    skipped_count += 1
-                    logger.info(f"⏭️ [{idx}/{len(voices_data)}] Skipped (duplicate): {voice.get('voice_name')}")
-                else:
-                    logger.error(f"❌ [{idx}/{len(voices_data)}] Failed: {voice.get('voice_name')} - {e}")
-                    failed.append(f"{voice.get('voice_name', 'Unknown')}: {error_msg}")
+#             except Exception as e:
+#                 error_msg = str(e)
+#                 if 'duplicate key' in error_msg.lower() or 'unique constraint' in error_msg.lower():
+#                     skipped_count += 1
+#                     logger.info(f"⏭️ [{idx}/{len(voices_data)}] Skipped (duplicate): {voice.get('voice_name')}")
+#                 else:
+#                     logger.error(f"❌ [{idx}/{len(voices_data)}] Failed: {voice.get('voice_name')} - {e}")
+#                     failed.append(f"{voice.get('voice_name', 'Unknown')}: {error_msg}")
         
-        logger.info(f"✅ Migration complete!")
-        logger.info(f"   Inserted: {inserted_count}")
-        logger.info(f"   Skipped (duplicates): {skipped_count}")
-        logger.info(f"   Failed: {len(failed)}")
+#         logger.info(f"✅ Migration complete!")
+#         logger.info(f"   Inserted: {inserted_count}")
+#         logger.info(f"   Skipped (duplicates): {skipped_count}")
+#         logger.info(f"   Failed: {len(failed)}")
         
-        return JSONResponse({
-            "success": True,
-            "message": f"Successfully migrated {inserted_count} voice samples!",
-            "summary": {
-                "total_records": len(voices_data),
-                "inserted": inserted_count,
-                "skipped_duplicates": skipped_count,
-                "failed": len(failed)
-            },
-            "failed_records": failed if failed else None
-        })
+#         return JSONResponse({
+#             "success": True,
+#             "message": f"Successfully migrated {inserted_count} voice samples!",
+#             "summary": {
+#                 "total_records": len(voices_data),
+#                 "inserted": inserted_count,
+#                 "skipped_duplicates": skipped_count,
+#                 "failed": len(failed)
+#             },
+#             "failed_records": failed if failed else None
+#         })
         
-    except json.JSONDecodeError as e:
-        logger.error(f"❌ Invalid JSON: {e}")
-        return error_response(f"Invalid JSON file: {str(e)}", 400)
-    except Exception as e:
-        logger.error(f"❌ Migration error: {e}")
-        traceback.print_exc()
-        return error_response(f"Migration failed: {str(e)}", 500)
+#     except json.JSONDecodeError as e:
+#         logger.error(f"❌ Invalid JSON: {e}")
+#         return error_response(f"Invalid JSON file: {str(e)}", 400)
+#     except Exception as e:
+#         logger.error(f"❌ Migration error: {e}")
+#         traceback.print_exc()
+#         return error_response(f"Migration failed: {str(e)}", 500)
 
 # @router.post("/admin/bulk-upload-voices")
 # async def bulk_upload_voices(
@@ -1629,3 +1790,54 @@ async def get_voice_samples(language: Optional[str] = Query(None)):
         logging.error(f"Error fetching voice samples: {e}")
         traceback.print_exc()
         return error_response("Failed to fetch voice samples", 500)
+    
+
+@router.post("/agents/{agent_id}/reset-minutes")
+async def reset_agent_minutes(
+    agent_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Reset used_minutes to 0 for billing cycle reset.
+    Called when admin receives payment and wants to reset the agent's quota.
+    """
+    try:
+        user_id = current_user["id"]
+        
+        # Get current stats before reset
+        agent = db.get_agent_by_id(agent_id)
+        if not agent or agent["admin_id"] != user_id:
+            return error_response("Agent not found or unauthorized", 404)
+        
+        old_used = agent.get("used_minutes", 0)
+        allowed = agent.get("allowed_minutes", 0)
+        
+        # Reset minutes
+        db.reset_agent_minutes(agent_id, user_id)
+        
+        logging.info(
+            f"✅ Agent {agent_id} minutes reset by admin {user_id}. "
+            f"Was: {old_used}/{allowed} min, Now: 0/{allowed} min"
+        )
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "message": "Agent minutes reset successfully",
+                "data": {
+                    "agent_id": agent_id,
+                    "previous_used_minutes": float(old_used),
+                    "allowed_minutes": allowed,
+                    "new_used_minutes": 0,
+                    "remaining_minutes": allowed
+                }
+            }
+        )
+        
+    except ValueError as e:
+        return error_response(str(e), 400)
+    except Exception as e:
+        logging.error(f"Error resetting agent minutes: {e}")
+        traceback.print_exc()
+        return error_response("Failed to reset minutes", 500)

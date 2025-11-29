@@ -204,3 +204,136 @@ END:VCALENDAR
         except Exception as e:
             logging.error(f" Failed to send reset email: {e}")
             return False
+        
+
+    async def send_owner_appointment_notification(
+        self,
+        owner_email: str,
+        owner_name: str,
+        customer_name: str,
+        customer_email: str,
+        customer_phone: str,
+        appointment_date: str,
+        start_time: str,
+        end_time: str,
+        title: str,
+        description: str,
+    ):
+        """
+        Send appointment notification to business owner.
+        Includes customer details for owner's reference.
+        """
+        try:
+            tz = pytz.timezone(self.TIMEZONE)
+            start_dt = tz.localize(datetime.strptime(f"{appointment_date} {start_time}", "%Y-%m-%d %H:%M"))
+            end_dt = tz.localize(datetime.strptime(f"{appointment_date} {end_time}", "%Y-%m-%d %H:%M"))
+            dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            dtstart = start_dt.astimezone(pytz.UTC).strftime("%Y%m%dT%H%M%SZ")
+            dtend = end_dt.astimezone(pytz.UTC).strftime("%Y%m%dT%H%M%SZ")
+            uid = f"{dtstamp}@{owner_email.split('@')[1]}"
+        
+            ics_content = f"""BEGIN:VCALENDAR
+    PRODID:-//YourCompany//AI Scheduler//EN
+    VERSION:2.0
+    CALSCALE:GREGORIAN
+    METHOD:REQUEST
+    BEGIN:VEVENT
+    UID:{uid}
+    DTSTAMP:{dtstamp}
+    DTSTART:{dtstart}
+    DTEND:{dtend}
+    SUMMARY:New Appointment: {customer_name}
+    DESCRIPTION:Customer Details:\\n\\nName: {customer_name}\\nEmail: {customer_email}\\nPhone: {customer_phone or 'N/A'}\\n\\nNotes: {description}
+    LOCATION:Your Business
+    STATUS:CONFIRMED
+    ORGANIZER;CN={owner_name}:MAILTO:{owner_email}
+    ATTENDEE;CN={owner_name};RSVP=TRUE:MAILTO:{owner_email}
+    BEGIN:VALARM
+    TRIGGER:-PT15M
+    ACTION:DISPLAY
+    DESCRIPTION:Reminder
+    END:VALARM
+    END:VEVENT
+    END:VCALENDAR
+    """.replace("\n", "\r\n")
+
+            msg = MIMEMultipart("mixed")
+            msg["Subject"] = f"New Appointment Booked: {customer_name}"
+            msg["From"] = f"{owner_name} <{self.MAIL_SENDER}>"
+            msg["To"] = owner_email
+
+            alternative = MIMEMultipart("alternative")
+            msg.attach(alternative)
+
+            # Email body for owner
+            plain_body = (
+                f"Dear {owner_name},\n\n"
+                f"A new appointment has been booked by your AI agent.\n\n"
+                f"📅 Date: {appointment_date}\n"
+                f"🕐 Time: {start_time} - {end_time}\n\n"
+                f"👤 Customer Details:\n"
+                f"   Name: {customer_name}\n"
+                f"   Email: {customer_email}\n"
+                f"   Phone: {customer_phone or 'N/A'}\n\n"
+                f"📝 Notes: {description or 'None'}\n\n"
+                f"This appointment has been added to your calendar.\n\n"
+                f"Best regards,\nYour AI Assistant"
+            )
+            
+            html_body = f"""
+            <html>
+                <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2 style="color: #2563eb;">New Appointment Booked 🎉</h2>
+                    <p>Dear {owner_name},</p>
+                    <p>A new appointment has been booked by your AI agent.</p>
+                    
+                    <div style="background-color: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                        <h3 style="margin-top: 0; color: #1f2937;">Appointment Details</h3>
+                        <p><strong>📅 Date:</strong> {appointment_date}</p>
+                        <p><strong>🕐 Time:</strong> {start_time} - {end_time}</p>
+                        
+                        <h3 style="color: #1f2937; margin-top: 20px;">Customer Information</h3>
+                        <p><strong>👤 Name:</strong> {customer_name}</p>
+                        <p><strong>📧 Email:</strong> {customer_email}</p>
+                        <p><strong>📱 Phone:</strong> {customer_phone or 'N/A'}</p>
+                        
+                        {f'<p><strong>📝 Notes:</strong> {description}</p>' if description else ''}
+                    </div>
+                    
+                    <p style="color: #6b7280; font-size: 14px;">
+                        This appointment has been automatically added to your calendar.
+                        The customer has also received a confirmation email.
+                    </p>
+                    
+                    <p>Best regards,<br>Your AI Assistant</p>
+                </body>
+            </html>
+            """
+            
+            alternative.attach(MIMEText(plain_body, "plain"))
+            alternative.attach(MIMEText(html_body, "html"))
+
+            ics_part = MIMEBase("text", "calendar", method="REQUEST", name="invite.ics")
+            ics_part.set_payload(ics_content)
+            encoders.encode_base64(ics_part)
+            ics_part.add_header("Content-Transfer-Encoding", "base64")
+            ics_part.add_header("Content-Disposition", "attachment; filename=invite.ics")
+            ics_part.add_header("Content-Class", "urn:content-classes:calendarmessage")
+            msg.attach(ics_part)
+
+            server = smtplib.SMTP("smtp.gmail.com", 587, timeout=self.timeout)
+            try:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(self.MAIL_SENDER, self.EMAIL_PASSWORD)
+                server.send_message(msg)
+            finally:
+                server.quit()
+
+            logging.info(f"📧 Owner notification sent to {owner_email}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"❌ Error sending owner notification: {e}")
+            return False

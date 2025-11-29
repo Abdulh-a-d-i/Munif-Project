@@ -3,19 +3,12 @@ import asyncio
 import logging
 import os
 import json
-import base64
-from typing import Any
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import traceback
 import boto3
 import httpx
 from dotenv import load_dotenv
-# Database imports
-import asyncpg
-# Google Cloud imports
-from google.cloud import storage
-from google.oauth2 import service_account
-# LiveKit imports
+
 from livekit import rtc, api
 from livekit.agents import (
     Agent,
@@ -27,15 +20,14 @@ from livekit.agents import (
     RunContext,
     get_job_context,
     RoomInputOptions,
-    BackgroundAudioPlayer,
-    AudioConfig,
-    BuiltinAudioClip
 )
 from livekit.plugins import deepgram, elevenlabs, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+
 load_dotenv(".env")
-logger = logging.getLogger("inbound-agent",)
+logger = logging.getLogger("inbound-agent")
 logger.setLevel(logging.INFO)
+
 # Environment variables
 BACKEND_API_URL = os.getenv("BACKEND_API_URL", "https://backend.mrbot-ki.de/api")
 HETZNER_BUCKET_NAME = os.getenv("HETZNER_BUCKET_NAME")
@@ -45,8 +37,11 @@ HETZNER_SECRET_KEY = os.getenv("HETZNER_SECRET_KEY")
 AGENT_API_SECRET = os.getenv("AGENT_API_SECRET")
 UPLOAD_TRANSCRIPTS = os.getenv("UPLOAD_TRANSCRIPTS", "true").lower() in ("1", "true", "yes")
 UPLOAD_RECORDINGS = os.getenv("UPLOAD_RECORDINGS", "true").lower() in ("1", "true", "yes")
-TURN_DETECTION_MIN_ENDPOINTING_DELAY = float(os.getenv("TURN_DETECTION_MIN_ENDPOINTING_DELAY", "0.3"))  # Reduced from 0.5
-TURN_DETECTION_MIN_SILENCE_DURATION = float(os.getenv("TURN_DETECTION_MIN_SILENCE_DURATION", "0.4"))  # Reduced from 0.5
+
+# 🔥 FIXED: Better turn detection settings
+TURN_DETECTION_MIN_ENDPOINTING_DELAY = float(os.getenv("TURN_DETECTION_MIN_ENDPOINTING_DELAY", "0.5"))
+TURN_DETECTION_MIN_SILENCE_DURATION = float(os.getenv("TURN_DETECTION_MIN_SILENCE_DURATION", "0.8"))
+
 
 VOICE_LIBRARY = {
     # English - Female
@@ -171,6 +166,7 @@ Step 4: Ask for their FULL NAME
 Step 5: Ask for their EMAIL and READ IT BACK
    Example: "What email address should I send the confirmation to?"
    Then: "Let me confirm - that's j dot smith at gmail dot com, correct?"
+   - ask clearly slowly, spelling out special characters like dot, at, dash, underscore.
 
 Step 6: Ask for their PHONE NUMBER
    Example: "And what's the best phone number to reach you?"
@@ -256,26 +252,24 @@ async def send_status_to_backend(
                 await asyncio.sleep(0.5)
 
 async def fetch_agent_config_from_backend(phone_number: str) -> dict | None:
-    """
-    Fetch agent configuration from backend API.
-    """
+    """Fetch agent configuration from backend API."""
     if not BACKEND_API_URL or not AGENT_API_SECRET:
         logger.error("❌ BACKEND_API_URL or AGENT_API_SECRET not configured")
         return None
     
-    # Clean the phone number - remove any curly braces, whitespace, etc.
     phone_number = phone_number.strip().strip('{}').strip()
     
     try:
         logger.info(f"📞 Fetching agent config from backend for: {phone_number}")
-        
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{BACKEND_API_URL}/agent/config/{phone_number}",
-                headers={
-                    "Authorization": f"Bearer {AGENT_API_SECRET}"
-                }
+                headers={"Authorization": f"Bearer {AGENT_API_SECRET}"}
             )
+            
+            if response.status_code == 403:
+                logger.error(f"⛔ Agent minutes exhausted for {phone_number}")
+                return None
             
             if response.status_code == 404:
                 logger.warning(f"⚠️ No agent found for phone: {phone_number}")
@@ -286,23 +280,16 @@ async def fetch_agent_config_from_backend(phone_number: str) -> dict | None:
                 return None
             
             data = response.json()
-            
             if not data.get("success"):
                 logger.error(f"❌ Backend error: {data.get('error')}")
                 return None
             
             config = data.get("agent")
-            
             if not config:
                 logger.error("❌ No agent data in response")
                 return None
             
             logger.info(f"✅ Agent config loaded: {config['agent_name']} (ID: {config.get('agent_id', config.get('id'))})")
-            logger.info(f"   Voice type: {config.get('voice_type', 'default')}")
-            logger.info(f"   Language: {config.get('language', 'en')}")
-            logger.info(f"   Industry: {config.get('industry', 'N/A')}")
-            logger.info(f"   Owner: {config.get('owner_name', 'N/A')}")
-            
             return config
             
     except httpx.TimeoutException:
@@ -313,28 +300,21 @@ async def fetch_agent_config_from_backend(phone_number: str) -> dict | None:
         traceback.print_exc()
         return None
 
-
 async def initialize_call_history(phone_number: str, call_id: str) -> dict | None:
-    """
-    Fetch dynamic/new data for the agent based on phone number.
-    """
+    """Fetch dynamic/new data for the agent based on phone number."""
     if not BACKEND_API_URL or not AGENT_API_SECRET:
         logger.error("❌ BACKEND_API_URL or AGENT_API_SECRET not configured")
         return None
     
-    # Clean the phone number
     phone_number = phone_number.strip().strip('{}').strip()
     
     try:
         logger.info(f"📊 Fetching dynamic data from backend for phone: {phone_number}")
-        
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{BACKEND_API_URL}/agent/new-call",
                 params={"phone_number": phone_number, "call_id": call_id},
-                headers={
-                    "Authorization": f"Bearer {AGENT_API_SECRET}"
-                }
+                headers={"Authorization": f"Bearer {AGENT_API_SECRET}"}
             )
             
             if response.status_code == 404:
@@ -346,19 +326,16 @@ async def initialize_call_history(phone_number: str, call_id: str) -> dict | Non
                 return None
             
             data = response.json()
-            
             if not data.get("success"):
                 logger.error(f"❌ Backend error: {data.get('error')}")
                 return None
             
             dynamic_data = data.get("dynamic_data")
-            
             if not dynamic_data:
                 logger.info("ℹ️ No dynamic data available")
                 return None
             
             logger.info(f"✅ Dynamic data loaded")
-            
             return dynamic_data
             
     except httpx.TimeoutException:
@@ -368,6 +345,8 @@ async def initialize_call_history(phone_number: str, call_id: str) -> dict | Non
         logger.error(f"❌ Unexpected error fetching dynamic data: {e}")
         traceback.print_exc()
         return None
+    
+
 
 def build_complete_system_prompt(
     agent_name: str,
@@ -400,8 +379,9 @@ class InboundAgent(Agent):
         self.industry = agent_config.get("industry")
         self.language = agent_config.get("language", "en")
         self.owner_name = agent_config.get("owner_name")
+        self.owner_email = agent_config.get("owner_email")  # 🔥 NEW
         
-        # Get context from backend (this is the system_prompt from DB)
+        # Get context from backend
         context_from_backend = agent_config.get("system_prompt", "")
         
         # Build complete system prompt
@@ -417,9 +397,8 @@ class InboundAgent(Agent):
         logger.info(f"🤖 Initializing agent '{self.agent_name}'")
         logger.info(f"   Language: {self.language}")
         logger.info(f"   Industry: {self.industry}")
-        logger.info(f"   Complete prompt length: {len(complete_system_prompt)} chars")
+        logger.info(f"   Owner email: {self.owner_email}")
         
-        # Pass complete prompt to parent Agent class
         super().__init__(instructions=complete_system_prompt)
         
         self.participant: rtc.RemoteParticipant | None = None
@@ -438,97 +417,80 @@ class InboundAgent(Agent):
     def set_caller_phone(self, phone: str):
         self.caller_phone = phone
     
-    # 🔥 FIXED: Improved appointment booking with email confirmation
+    # 🔥 FIXED: Correct appointment booking payload
     @function_tool()
     async def book_appointment(
-            self,
-            ctx: RunContext,
-            appointment_date: str,
-            start_time: str,
-            end_time: str,
-            customer_name: str,
-            customer_email: str,
-            customer_phone: str = None,
-            title: str = "Appointment",
-            notes: str = None
-        ):
-            """
-            Book an appointment and send confirmation email.
-            ONLY call this function when you have collected ALL required information from the customer.
-            
-            REQUIRED information you MUST collect before calling this:
-            - appointment_date: Date in YYYY-MM-DD format (e.g., 2025-12-15)
-            - start_time: Start time in HH:MM 24-hour format (e.g., 14:30)
-            - end_time: End time in HH:MM 24-hour format (e.g., 15:30)
-            - customer_name: Full name of the customer
-            - customer_email: Email address (MUST read back to customer for confirmation)
-            - customer_phone: Phone number
-            
-            Args:
-                appointment_date: Date in YYYY-MM-DD format
-                start_time: Start time in HH:MM 24-hour format
-                end_time: End time in HH:MM 24-hour format
-                customer_name: Full name of the person booking
-                customer_email: Email to send confirmation to (MUST be confirmed with customer)
-                customer_phone: Phone number of the customer
-                title: Title of the appointment
-                notes: Any special requests or notes
-            """
-            await _speak_status_update(ctx, "Perfect! Let me book that for you now...")
+        self,
+        ctx: RunContext,
+        appointment_date: str,
+        start_time: str,
+        end_time: str,
+        customer_name: str,
+        customer_email: str,
+        customer_phone: str = None,
+        title: str = "Appointment",
+        notes: str = None
+    ):
+        """
+        Book an appointment. ONLY call when you have ALL required info:
+        - appointment_date: YYYY-MM-DD format (e.g., 2025-12-15)
+        - start_time: HH:MM 24-hour format (e.g., 14:30)
+        - end_time: HH:MM 24-hour format (e.g., 15:30)
+        - customer_name: Full name
+        - customer_email: Email (MUST be confirmed with customer)
+        - customer_phone: Phone number
+        """
+        try:
+            logger.info(f"📅 Booking appointment: {appointment_date} {start_time}-{end_time}")
+            logger.info(f"   Customer: {customer_name} ({customer_email})")
 
-            try:
-                logger.info(f"📅 Booking appointment: {appointment_date} {start_time}-{end_time}")
-                logger.info(f"   Customer: {customer_name} ({customer_email})")
+            # 🔥 FIXED: Correct payload structure
+            payload = {
+                "user_id": self.agent_id,  # Agent ID
+                "appointment_date": appointment_date,
+                "start_time": start_time,
+                "end_time": end_time,
+                "customer_name": customer_name,  # ✅ FIXED
+                "customer_email": customer_email,  # ✅ FIXED
+                "customer_phone": customer_phone or self.caller_phone,
+                "title": title,
+                "description": notes or "Appointment scheduled via phone call",
+                "organizer_name": self.owner_name,  # ✅ FIXED
+            }
 
-                payload = {
-                    "user_id": self.agent_id,
-                    "appointment_date": appointment_date,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "attendee_name": self.agent_name,
-                    "title": title,
-                    "description": notes or f"Appointment scheduled via phone call",
-                    "organizer_name": self.agent_name,
-                    "organizer_email": customer_email,
-                    "customer_name": customer_name,
-                    "customer_email": customer_email,
-                    "customer_phone": customer_phone or self.caller_phone
-                }
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.post(
+                    f"{BACKEND_API_URL}/agent/book-appointment",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {AGENT_API_SECRET}"}
+                )
 
-                async with httpx.AsyncClient(timeout=20.0) as client:
-                    response = await client.post(
-                        f"{BACKEND_API_URL}/agent/book-appointment",
-                        json=payload,
-                        headers={"Authorization": f"Bearer {AGENT_API_SECRET}"}
-                    )
+                logger.info(f"📬 Booking response: {response.status_code}")
 
-                    logger.info(f"📬 Booking response: {response.status_code}")
+                if response.status_code in (200, 201):
+                    data = response.json()
+                    if data.get("success"):
+                        return {
+                            "success": True,
+                            "message": f"Your appointment is confirmed for {appointment_date} at {start_time}. "
+                                    f"A confirmation email has been sent to {customer_email}."
+                        }
 
-                    if response.status_code in (200, 201):
-                        data = response.json()
-                        if data.get("success"):
-                            return {
-                                "success": True,
-                                "message": f"Your appointment is confirmed for {appointment_date} at {start_time}. "
-                                        f"A confirmation email has been sent to {customer_email}."
-                            }
+                # Handle errors
+                msg = response.json().get("message", "There was an issue booking the appointment.")
+                return {"success": False, "message": msg}
 
-                    # Handle errors
-                    msg = response.json().get("message", "There was an issue booking the appointment.")
-                    return {"success": False, "message": msg}
-
-            except Exception as e:
-                logger.error(f"❌ Error booking appointment: {e}")
-                traceback.print_exc()
-                return {
-                    "success": False,
-                    "message": "I'm having trouble with the booking system right now. "
-                            "Could you please call back in a few minutes or try again?"
-                }
+        except Exception as e:
+            logger.error(f"❌ Error booking appointment: {e}")
+            traceback.print_exc()
+            return {
+                "success": False,
+                "message": "I'm having trouble with the booking system. Could you please call back later?"
+            }
     
     @function_tool()
     async def end_call(self, ctx: RunContext):
-        """End the phone call politely and hang up. Use this when the conversation is complete."""
+        """End the phone call. Use when conversation is complete."""
         logger.info("📞 Ending call...")
         try:
             await ctx.wait_for_playout()
@@ -549,19 +511,16 @@ class InboundAgent(Agent):
             pass
 
 async def entrypoint(ctx: JobContext):
-    """Entrypoint for inbound calls with voice name support."""
+    """Entrypoint for inbound calls."""
     logger.info("=" * 80)
     logger.info(f"📞 INBOUND CALL - Room: {ctx.room.name}")
     logger.info("=" * 80)
     
-    # Connect first to get participants
     await ctx.connect()
     
-    # Initialize variables
     called_number = 'unknown'
     caller_number = 'unknown'
     
-    # Wait for SIP participant to join
     logger.info("⏳ Waiting for SIP participant...")
     max_wait = 5
     waited = 0
@@ -569,12 +528,7 @@ async def entrypoint(ctx: JobContext):
     while waited < max_wait:
         for participant in ctx.room.remote_participants.values():
             if hasattr(participant, 'attributes'):
-                logger.info(f"📋 Participant attributes: {dict(participant.attributes)}")
-                
-                # Get the called number (the number being dialed - DNIS)
                 called_number = participant.attributes.get('sip.trunkPhoneNumber', 'unknown')
-                
-                # Get the caller number (the number calling - ANI)
                 caller_number = (
                     participant.attributes.get('sip.fromNumber') or
                     participant.attributes.get('sip.callerNumber') or
@@ -582,8 +536,8 @@ async def entrypoint(ctx: JobContext):
                     'unknown'
                 )
                 
-                logger.info(f"📱 Called number (DNIS): {called_number}")
-                logger.info(f"📱 Caller number (ANI): {caller_number}")
+                logger.info(f"📱 Called number: {called_number}")
+                logger.info(f"📱 Caller number: {caller_number}")
                 
                 if called_number != 'unknown':
                     break
@@ -594,7 +548,6 @@ async def entrypoint(ctx: JobContext):
         await asyncio.sleep(0.5)
         waited += 0.5
     
-    # Use called_number as phone_number
     phone_number = called_number
 
     if not phone_number or phone_number == 'unknown':
@@ -604,65 +557,64 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"✅ Using phone number: {phone_number}")
     logger.info(f"✅ Caller number: {caller_number}")
 
-    # Start parallel async tasks
+    # Fetch config
     config_task = asyncio.create_task(fetch_agent_config_from_backend(phone_number))
     dynamic_task = asyncio.create_task(initialize_call_history(phone_number, ctx.room.name))
     
-    # Await the config task
     agent_config = await config_task
     
     if not agent_config:
-        logger.error(f"❌ No agent configured for phone number: {phone_number}")
+        logger.error(f"❌ No agent configured or minutes exhausted for: {phone_number}")
         return
     
-    # Await the dynamic data task
-    dynamic_data = await dynamic_task
+    await dynamic_task
 
     # Extract configuration
     language = agent_config.get("language", "de")
     agent_id = agent_config.get("agent_id") or agent_config.get("id")
-    
-    # Get voice name from config
     voice_name = agent_config.get("voice_type", "Lea")
-    
-    # 🔥 FIXED: Get the correct voice ID
     voice_id = get_voice_id(voice_name)
     
-    logger.info(f"🎤 Voice name: {voice_name}")
-    logger.info(f"🎤 Voice ID: {voice_id}")
+    logger.info(f"🎤 Voice: {voice_name} ({voice_id})")
     logger.info(f"🌐 Language: {language}")
     logger.info(f"🆔 Agent ID: {agent_id}")
     
-    # Create agent with complete prompt
+    # Create agent
     agent = InboundAgent(agent_config=agent_config)
     agent.set_caller_phone(caller_number)
     
-    # 🔥 IMPROVED: Better turn detection
-    turn_detector = MultilingualModel()
+    # 🔥 FIXED: Better turn detection with proper parameters
+    turn_detector = MultilingualModel(
+        languages=[language],
+        min_endpointing_delay=TURN_DETECTION_MIN_ENDPOINTING_DELAY,
+        min_silence_duration=TURN_DETECTION_MIN_SILENCE_DURATION
+    )
     
-    # 🔥 FIXED: Use the correct voice_id instead of hardcoded one
+    # 🔥 FIXED: Better session configuration
     session = AgentSession(
         llm=openai.LLM(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             api_key=os.getenv("OPENAI_API_KEY"),
-            temperature=0.7,  # More natural responses
+            temperature=0.5,  
         ),
         stt=deepgram.STT(
             api_key=os.getenv("DEEPGRAM_API_KEY"),
-            model="nova-2-general",  # Better speech recognition
+            model="nova-2-general",
             language=language,
         ),
         tts=elevenlabs.TTS(
             api_key=os.getenv("ELEVENLABS_API_KEY"),
             model="eleven_flash_v2_5",
-            voice_id=voice_id,  # 🔥 FIXED: Use configured voice_id instead of hardcoded
-            optimize_streaming_latency=4,  # Reduce latency
+            voice_id=voice_id,
+            optimize_streaming_latency=4,
             stability=0.5,
             similarity_boost=0.75,
         ),
+        # 🔥 FIXED: Better VAD settings
         vad=silero.VAD.load(
-            min_silence_duration=0.3,  # More responsive
-            min_speech_duration=0.1,
+            min_silence_duration=0.5,  # ✅ Increased to avoid cutting off
+            min_speech_duration=0.2,   # ✅ Better balance
+            activation_threshold=0.5,  # ✅ Added threshold
         ),
         turn_detection=turn_detector,
         min_endpointing_delay=TURN_DETECTION_MIN_ENDPOINTING_DELAY,
@@ -781,9 +733,9 @@ async def entrypoint(ctx: JobContext):
             )
             
             lkapi = api.LiveKitAPI(
-                url=os.getenv("LIVEKIT_URL", "").replace("wss://", "https://"),
-                api_key=os.getenv("LIVEKIT_API_KEY"),
-                api_secret=os.getenv("LIVEKIT_API_SECRET"),
+                url=os.getenv("AGENT_URL", "").replace("wss://", "https://"),
+                api_key=os.getenv("AGENT_API_KEY"),
+                api_secret=os.getenv("AGENT_API_SECRET"),
             )
             
             egress_resp = await lkapi.egress.start_room_composite_egress(req)
@@ -867,10 +819,21 @@ async def entrypoint(ctx: JobContext):
         traceback.print_exc()
         ctx.shutdown()
 
+# if __name__ == "__main__":
+#     cli.run_app(
+#         WorkerOptions(
+#             entrypoint_fnc=entrypoint,
+#             agent_name="inbound-agent",
+#         )
+#     )
+
 if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             agent_name="inbound-agent",
+            ws_url=os.getenv("AGENT_URL"),
+            api_key=os.getenv("AGENT_API_KEY"),
+            api_secret=os.getenv("AGENT_API_SECRET"),
         )
     )

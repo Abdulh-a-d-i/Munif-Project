@@ -39,6 +39,7 @@ class PGDB:
         self.create_agents_table()
         self.create_call_history_table()
         self.create_voice_samples_table()
+        self.add_agent_fields_if_not_exists()
 
     def get_connection(self):
         """Get connection from pool"""
@@ -100,7 +101,8 @@ class PGDB:
 
     def get_agent_by_phone(self, phone_number: str):
         """
-        Get specific agent details by phone number
+        Get specific agent details by phone number.
+        ✅ Now includes owner_email, business_hours, and minutes.
         """
         with self.get_connection_context() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -111,7 +113,13 @@ class PGDB:
                         industry, 
                         system_prompt, 
                         voice_type,
-                        language
+                        language,
+                        owner_name,
+                        owner_email,
+                        business_hours_start,
+                        business_hours_end,
+                        allowed_minutes,
+                        COALESCE(used_minutes, 0) as used_minutes
                     FROM agents 
                     WHERE phone_number = %s AND is_active = TRUE
                     LIMIT 1
@@ -936,7 +944,7 @@ class PGDB:
 
     def create_agent_with_voice_type(self, agent_data: dict):
         """
-        Create agent with voice_type, owner_name, and avatar_url.
+        Create agent with new fields: owner_email, business hours, minutes.
         """
         with self.get_connection_context() as conn:
             try:
@@ -944,9 +952,13 @@ class PGDB:
                     cursor.execute("""
                         INSERT INTO agents (
                             phone_number, agent_name, system_prompt,
-                            voice_type, language, industry, owner_name, avatar_url, admin_id
+                            voice_type, language, industry, 
+                            owner_name, owner_email, avatar_url,
+                            business_hours_start, business_hours_end,
+                            allowed_minutes, used_minutes,
+                            admin_id
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING *;
                     """, (
                         agent_data["phone_number"],
@@ -956,23 +968,29 @@ class PGDB:
                         agent_data.get("language", "en"),
                         agent_data.get("industry"),
                         agent_data.get("owner_name"),
-                        agent_data.get("avatar_url"),  # NEW
+                        agent_data.get("owner_email"),  # NEW
+                        agent_data.get("avatar_url"),
+                        agent_data.get("business_hours_start"),  # NEW
+                        agent_data.get("business_hours_end"),    # NEW
+                        agent_data.get("allowed_minutes", 0),    # NEW
+                        0,  # used_minutes starts at 0           # NEW
                         agent_data["admin_id"]
                     ))
                     result = cursor.fetchone()
                 conn.commit()
-                logging.info(f"✅ Created agent {result['id']} with avatar")
+                logging.info(f"✅ Created agent {result['id']} with minutes limit")
                 return result
             except Exception as e:
                 conn.rollback()
                 logging.error(f"Error creating agent: {e}")
                 raise
+
         
 
 
     def update_agent_with_voice_type(self, agent_id: int, admin_id: int, updates: dict):
         """
-        Update agent including avatar_url.
+        Update agent including new fields.
         """
         if not updates:
             return None
@@ -994,7 +1012,10 @@ class PGDB:
                 
                 allowed_fields = {
                     'agent_name', 'system_prompt', 'voice_type', 
-                    'language', 'industry', 'phone_number', 'owner_name', 'avatar_url'
+                    'language', 'industry', 'phone_number', 
+                    'owner_name', 'owner_email', 'avatar_url',
+                    'business_hours_start', 'business_hours_end', 
+                    'allowed_minutes'  # Can update limit, but NOT used_minutes directly
                 }
                 
                 for key, value in updates.items():
@@ -1212,3 +1233,237 @@ class PGDB:
                     ORDER BY voice_name
                 """, (language,))
                 return cursor.fetchall()
+            
+    def add_agent_fields_if_not_exists(self):
+        """
+        Add new fields to agents table if they don't exist:
+        - owner_email: Business owner's email
+        - business_hours_start: Opening time (HH:MM format)
+        - business_hours_end: Closing time (HH:MM format)
+        - allowed_minutes: Total minutes allocated per billing cycle
+        - used_minutes: Minutes consumed in current billing cycle
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    # Add owner_email
+                    cursor.execute("""
+                        DO $$ 
+                        BEGIN 
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name='agents' AND column_name='owner_email'
+                            ) THEN
+                                ALTER TABLE agents ADD COLUMN owner_email VARCHAR(255);
+                            END IF;
+                        END $$;
+                    """)
+                    
+                    # Add business_hours_start (TIME type)
+                    cursor.execute("""
+                        DO $$ 
+                        BEGIN 
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name='agents' AND column_name='business_hours_start'
+                            ) THEN
+                                ALTER TABLE agents ADD COLUMN business_hours_start TIME;
+                            END IF;
+                        END $$;
+                    """)
+                    
+                    # Add business_hours_end
+                    cursor.execute("""
+                        DO $$ 
+                        BEGIN 
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name='agents' AND column_name='business_hours_end'
+                            ) THEN
+                                ALTER TABLE agents ADD COLUMN business_hours_end TIME;
+                            END IF;
+                        END $$;
+                    """)
+                    
+                    # Add allowed_minutes (integer, default 0)
+                    cursor.execute("""
+                        DO $$ 
+                        BEGIN 
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name='agents' AND column_name='allowed_minutes'
+                            ) THEN
+                                ALTER TABLE agents ADD COLUMN allowed_minutes INTEGER DEFAULT 0;
+                            END IF;
+                        END $$;
+                    """)
+                    
+                    # Add used_minutes (DECIMAL for precision)
+                    cursor.execute("""
+                        DO $$ 
+                        BEGIN 
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name='agents' AND column_name='used_minutes'
+                            ) THEN
+                                ALTER TABLE agents ADD COLUMN used_minutes DECIMAL(10, 2) DEFAULT 0;
+                            END IF;
+                        END $$;
+                    """)
+                    
+                    # Create index for faster queries
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_agents_minutes_check 
+                        ON agents(used_minutes, allowed_minutes) 
+                        WHERE is_active = TRUE;
+                    """)
+                    
+                conn.commit()
+                logging.info("✅ Agent fields added/verified successfully")
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"❌ Error adding agent fields: {e}")
+                raise
+
+    def check_agent_minutes_available(self, agent_id: int) -> dict:
+        """
+        Check if agent has available minutes.
+        Returns: {
+            "available": bool,
+            "allowed_minutes": int,
+            "used_minutes": float,
+            "remaining_minutes": float
+        }
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        allowed_minutes,
+                        COALESCE(used_minutes, 0) as used_minutes,
+                        (allowed_minutes - COALESCE(used_minutes, 0)) as remaining_minutes
+                    FROM agents 
+                    WHERE id = %s AND is_active = TRUE
+                """, (agent_id,))
+                
+                result = cursor.fetchone()
+                
+                if not result:
+                    return {
+                        "available": False,
+                        "allowed_minutes": 0,
+                        "used_minutes": 0,
+                        "remaining_minutes": 0
+                    }
+                
+                return {
+                    "available": result["remaining_minutes"] > 0,
+                    "allowed_minutes": result["allowed_minutes"],
+                    "used_minutes": float(result["used_minutes"]),
+                    "remaining_minutes": float(result["remaining_minutes"])
+                }
+
+    def update_agent_used_minutes(self, agent_id: int, call_duration_minutes: float):
+        """
+        Increment used_minutes after a call ends.
+        
+        Args:
+            agent_id: Agent ID
+            call_duration_minutes: Duration in minutes (will be rounded to 2 decimals)
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        UPDATE agents 
+                        SET used_minutes = COALESCE(used_minutes, 0) + %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING id, used_minutes, allowed_minutes;
+                    """, (round(call_duration_minutes, 2), agent_id))
+                    
+                    result = cursor.fetchone()
+                conn.commit()
+                
+                if result:
+                    logging.info(
+                        f"✅ Agent {agent_id}: Used minutes updated to {result[1]}/{result[2]}"
+                    )
+                return result
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"❌ Error updating used minutes: {e}")
+                raise
+
+    def reset_agent_minutes(self, agent_id: int, admin_id: int):
+        """
+        Reset used_minutes to 0 for billing cycle reset.
+        Only owner can reset their agent's minutes.
+        
+        Args:
+            agent_id: Agent ID
+            admin_id: Admin user ID (for authorization)
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    # Verify ownership
+                    cursor.execute(
+                        "SELECT id FROM agents WHERE id = %s AND admin_id = %s",
+                        (agent_id, admin_id)
+                    )
+                    if not cursor.fetchone():
+                        raise ValueError("Agent not found or unauthorized")
+                    
+                    # Reset minutes
+                    cursor.execute("""
+                        UPDATE agents 
+                        SET used_minutes = 0,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING id, allowed_minutes;
+                    """, (agent_id,))
+                    
+                    result = cursor.fetchone()
+                conn.commit()
+                
+                logging.info(f"✅ Agent {agent_id} minutes reset (limit: {result[1]} min)")
+                return True
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"❌ Error resetting minutes: {e}")
+                raise
+
+    def get_agent_with_minutes_check(self, agent_id: int):
+        """
+        Get agent details with minutes availability check.
+        Used before accepting calls.
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        id AS agent_id,
+                        agent_name,
+                        phone_number,
+                        owner_name,
+                        owner_email,
+                        industry,
+                        system_prompt,
+                        voice_type,
+                        language,
+                        allowed_minutes,
+                        COALESCE(used_minutes, 0) as used_minutes,
+                        (allowed_minutes - COALESCE(used_minutes, 0)) as remaining_minutes,
+                        business_hours_start,
+                        business_hours_end,
+                        CASE 
+                            WHEN (allowed_minutes - COALESCE(used_minutes, 0)) > 0 
+                            THEN TRUE 
+                            ELSE FALSE 
+                        END as can_accept_calls
+                    FROM agents 
+                    WHERE id = %s AND is_active = TRUE
+                """, (agent_id,))
+                
+                return cursor.fetchone()

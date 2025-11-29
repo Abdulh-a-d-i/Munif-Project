@@ -82,6 +82,10 @@ class CreateAgentRequest(BaseModel):
     language: Optional[str] = Field(default="en", max_length=10)
     industry: Optional[str] = Field(default=None, max_length=50)
     owner_name: Optional[str] = Field(default=None, max_length=100)
+    owner_email: Optional[EmailStr] = Field(default=None)  # NEW
+    business_hours_start: Optional[str] = Field(default=None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
+    business_hours_end: Optional[str] = Field(default=None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
+    allowed_minutes: Optional[int] = Field(default=0, ge=0)  # NEW
     
     class Config:
         json_schema_extra = {
@@ -92,7 +96,11 @@ class CreateAgentRequest(BaseModel):
                 "voice_type": "female",
                 "language": "en",
                 "industry": "healthcare",
-                "owner_name": "John Doe"
+                "owner_name": "John Doe",
+                "owner_email": "john@example.com",
+                "business_hours_start": "09:00",
+                "business_hours_end": "17:00",
+                "allowed_minutes": 500
             }
         }
 
@@ -106,6 +114,10 @@ class UpdateAgentRequest(BaseModel):
     language: Optional[str] = Field(None, max_length=10)
     industry: Optional[str] = Field(None, max_length=50)
     owner_name: Optional[str] = Field(None, max_length=100)
+    owner_email: Optional[EmailStr] = Field(None)  # NEW
+    business_hours_start: Optional[str] = Field(None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
+    business_hours_end: Optional[str] = Field(None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
+    allowed_minutes: Optional[int] = Field(None, ge=0)  # NEW
     
     class Config:
         json_schema_extra = {
@@ -113,7 +125,24 @@ class UpdateAgentRequest(BaseModel):
                 "agent_name": "Updated Agent Name",
                 "voice_type": "male",
                 "industry": "retail",
-                "owner_name": "Jane Smith"
+                "owner_name": "Jane Smith",
+                "owner_email": "jane@example.com",
+                "business_hours_start": "08:00",
+                "business_hours_end": "18:00",
+                "allowed_minutes": 1000
+            }
+        }
+
+
+# NEW: Model for reset minutes request
+class ResetAgentMinutesRequest(BaseModel):
+    """Request model for resetting agent minutes"""
+    agent_id: int = Field(..., gt=0)
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "agent_id": 5
             }
         }
 
