@@ -152,3 +152,10 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     token: str
     new_password: str = Field(..., min_length=8)
+
+
+class ContactFormRequest(BaseModel):
+    first_name: str
+    last_name: str
+    email: EmailStr
+    message: Optional[str] = None

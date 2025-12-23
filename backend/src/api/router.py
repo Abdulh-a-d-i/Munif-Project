@@ -33,7 +33,8 @@ from src.api.base_models import (
     UpdateAgentRequest,
     CreateAgentRequest,
     ResetPasswordRequest,
-    ForgotPasswordRequest
+    ForgotPasswordRequest,
+    ContactFormRequest
 )
 from src.utils.db import PGDB 
 from src.utils.mail_management import Send_Mail
@@ -47,9 +48,9 @@ from src.utils.utils import (
     check_if_answered, 
     hetzner_storage,
     generate_presigned_url,
-    get_s3_client
+    get_s3_client,
+    serialize_agent_data
 )
-from livekit import api
 from fastapi import File, UploadFile, Form
 
 load_dotenv()
@@ -386,28 +387,38 @@ async def update_call_recording(request: Request):
 @router.post("/agent/save-call-data")
 async def save_call_data(request: Request):
     """
-    Save transcript and recording metadata after call ends.
+    Save transcript, recording metadata, and ACCURATE call duration after call ends.
     
     This receives:
-    - transcript_blob: Path in Hetzner bucket (e.g., "transcripts/xxx.json")
-    - recording_blob: Path in Hetzner bucket (e.g., "recordings/xxx.ogg")
+    - transcript_blob: Path in Hetzner bucket
+    - recording_blob: Path in Hetzner bucket
+    - call_duration_seconds: ACCURATE duration from agent (SIP participant join → leave)
+    - agent_id: To update used_minutes
     
     Backend will:
-    1. Store paths in DB immediately
-    2. Download transcript after 5s delay → Store JSONB in DB
-    3. Recording stays in Hetzner (access via presigned URL)
+    1. Store paths + duration in DB
+    2. Update agent's used_minutes (accumulative)
+    3. Download transcript after 5s delay → Store JSONB in DB
     """
     try:
         data = await request.json()
         
         call_id = data.get("call_id")
+        agent_id = data.get("agent_id")
         transcript_blob = data.get("transcript_blob")
         recording_blob = data.get("recording_blob")
         transcript_url = data.get("transcript_url")
         recording_url = data.get("recording_url")
+        call_duration_seconds = data.get("call_duration_seconds")
+        sip_joined_at = data.get("sip_joined_at")
+        sip_left_at = data.get("sip_left_at")
         
-        # Save metadata (paths only)
+        if not call_id:
+            return error_response("Missing call_id", 400)
+        
+        # Update call history with ACCURATE duration
         updates = {}
+        
         if transcript_blob:
             updates["transcript_blob"] = transcript_blob
         if recording_blob:
@@ -417,26 +428,86 @@ async def save_call_data(request: Request):
         if recording_url:
             updates["recording_url"] = recording_url
         
+        # Store accurate duration from agent
+        if call_duration_seconds is not None:
+            updates["duration"] = float(call_duration_seconds)
+            logging.info(
+                f"⏱️ Call {call_id}: Duration = {call_duration_seconds:.2f}s "
+                f"({call_duration_seconds / 60:.2f} min)"
+            )
+        
+        # Store SIP participant timestamps
+        if sip_joined_at:
+            try:
+                updates["started_at"] = datetime.fromisoformat(sip_joined_at)
+            except:
+                pass
+        
+        if sip_left_at:
+            try:
+                updates["ended_at"] = datetime.fromisoformat(sip_left_at)
+            except:
+                pass
+        
+        # Mark call as completed
+        updates["status"] = "completed"
+        
         if updates:
             db.update_call_history(call_id, updates)
+            logging.info(f"✅ Call history updated for {call_id}")
+        
+        # Update agent's used_minutes (ACCUMULATIVE)
+        if agent_id and call_duration_seconds and call_duration_seconds > 0:
+            duration_minutes = call_duration_seconds / 60
+            
+            try:
+                # Get current usage
+                minutes_check = db.check_agent_minutes_available(agent_id)
+                old_used = minutes_check["used_minutes"]
+                
+                # Update (will add to existing)
+                db.update_agent_used_minutes(agent_id, duration_minutes)
+                
+                # Verify update
+                new_check = db.check_agent_minutes_available(agent_id)
+                new_used = new_check["used_minutes"]
+                
+                logging.info(
+                    f"✅ Agent {agent_id} minutes updated: "
+                    f"{old_used:.2f} → {new_used:.2f} min "
+                    f"(+{duration_minutes:.2f} min from call {call_id})"
+                )
+                
+                # Warn if approaching limit
+                if new_check["remaining_minutes"] < 60:  # Less than 1 hour
+                    logging.warning(
+                        f"⚠️ Agent {agent_id} low on minutes: "
+                        f"{new_check['remaining_minutes']:.1f} min remaining"
+                    )
+                
+            except Exception as e:
+                logging.error(f"❌ Failed to update agent minutes: {e}")
+                traceback.print_exc()
+                # Don't fail the entire request if minutes update fails
         
         # DELAYED transcript download & DB storage (5s)
         if transcript_blob:
             async def delayed_transcript():
                 await asyncio.sleep(5)
-                logging.info(f"?? Downloading transcript for {call_id}")
+                logging.info(f"📥 Downloading transcript for {call_id}")
                 await fetch_and_store_transcript(call_id, None, transcript_blob)
             asyncio.create_task(delayed_transcript())
         
-        # Recording stays in Hetzner - no download needed!
-        # Frontend will use presigned URL to stream it
+        return JSONResponse({
+            "success": True,
+            "message": "Call data saved successfully",
+            "duration_minutes": round(call_duration_seconds / 60, 2) if call_duration_seconds else None
+        })
         
-        return JSONResponse({"success": True})
     except Exception as e:
         logging.error(f"save_call_data error: {e}")
+        traceback.print_exc()
         return JSONResponse({"error": str(e)}, status_code=500)
-
-#
 
 # ==================== AGENT MANAGEMENT ====================
 @router.get("/agents/{agent_id}/calls")
@@ -551,7 +622,8 @@ async def get_agent_config(phone_number: str):
             f"✅ Agent {agent_id} config sent - "
             f"{minutes_check['remaining_minutes']:.1f} minutes remaining"
         )
-        
+        agent = serialize_agent_data(dict(agent))
+
         return JSONResponse({
             "success": True,
             "agent": agent
@@ -565,29 +637,51 @@ async def get_agent_config(phone_number: str):
         raise HTTPException(status_code=500, detail=str(e))
     
 @router.get("/agent/new-call")
-async def new_call(phone_number: str = Query(...), call_id: str = Query(...)):
-    """Initialize call history record"""
+async def new_call(
+    phone_number: str = Query(...), 
+    call_id: str = Query(...),
+    caller_number: str = Query(None)
+):
+    """
+    Initialize call history record with caller information.
+    NOW: Stores caller_number (customer's phone) in database.
+    """
     try:
         agent = db.get_agent_by_phone(phone_number)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         
-        # 🔥 FIX: Actually insert the call history record
+        # Clean and validate caller_number
+        cleaned_caller = None
+        if caller_number and caller_number != 'unknown':
+            # Remove any SIP formatting
+            cleaned_caller = caller_number.strip()
+            if '@' in cleaned_caller:
+                cleaned_caller = cleaned_caller.split('@')[0].replace('sip:', '')
+            
+            logging.info(f"📞 Call from {cleaned_caller} to agent {agent['agent_id']}")
+        else:
+            logging.info(f"📞 Call from unknown number to agent {agent['agent_id']}")
+        
+        # INSERT call history with caller_number
         db.insert_call_history(
             agent_id=agent["agent_id"],
             call_id=call_id,
-            status="initialized"
+            status="initialized",
+            caller_number=cleaned_caller
         )
         
         return JSONResponse({
             "success": True,
             "message": "Call history initialized",
-            "agent_id": agent["agent_id"]  # Return agent_id for verification
+            "agent_id": agent["agent_id"],
+            "caller_number": cleaned_caller
         })
     except Exception as e:
         logging.error(f"Error initializing call: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
     
 @router.get("/analytics")
 async def get_dashboard_analytics(current_user: dict = Depends(get_current_user)):
@@ -604,6 +698,8 @@ async def get_dashboard_analytics(current_user: dict = Depends(get_current_user)
             # Add presigned URLs
             if agent.get("avatar_url"):
                 agent["avatar_presigned_url"] = generate_presigned_url(agent["avatar_url"], expiration=86400)
+            
+            agent = serialize_agent_data(agent)
             
             # Add minutes info
             agent_id = agent.get("id")
@@ -645,6 +741,7 @@ async def get_all_agents(
         for agent in result.get("agents", []):
             # Add presigned URLs
             add_presigned_urls_to_agent(agent)
+            agent= serialize_agent_data(agent)
             
             # Add minutes info
             agent_id = agent.get("id")
@@ -708,6 +805,7 @@ async def get_agent_detail(
         
         # Add presigned URL to agent
         add_presigned_urls_to_agent(agent_detail)
+        agent_detail = serialize_agent_data(agent_detail)
         
         # Add presigned URLs to calls
         for call in agent_detail.get("calls", {}).get("data", []):
@@ -816,11 +914,8 @@ async def create_agent(
         # Save to database
         agent = db.create_agent_with_voice_type(agent_data)
         
-        # Format timestamps
-        if agent.get("created_at"):
-            agent["created_at"] = agent["created_at"].isoformat()
-        if agent.get("updated_at"):
-            agent["updated_at"] = agent["updated_at"].isoformat()
+        # 🔥 FIX: Serialize time objects before JSON response
+        agent = serialize_agent_data(agent)
         
         # Add presigned URL for response
         add_presigned_urls_to_agent(agent)
@@ -833,6 +928,8 @@ async def create_agent(
                 "data": agent
             }
         )
+
+        
         
     except ValueError as e:
         return error_response(str(e), 400)
@@ -898,14 +995,18 @@ async def update_agent(
                 return error_response("allowed_minutes cannot be negative", 400)
             updates["allowed_minutes"] = allowed_minutes
         
-        # Validate business hours if both provided
-        if "business_hours_start" in updates and "business_hours_end" in updates:
+        
+        if "business_hours_start" in updates:
             import re
             time_pattern = r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$'
             if not re.match(time_pattern, updates["business_hours_start"]):
-                return error_response("Invalid business_hours_start format", 400)
+                return error_response("Invalid business_hours_start format. Use HH:MM", 400)
+
+        if "business_hours_end" in updates:
+            import re
+            time_pattern = r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$'
             if not re.match(time_pattern, updates["business_hours_end"]):
-                return error_response("Invalid business_hours_end format", 400)
+                return error_response("Invalid business_hours_end format. Use HH:MM", 400)
         
         # Handle avatar upload
         if avatar and avatar.filename:
@@ -946,11 +1047,8 @@ async def update_agent(
         if not result:
             return error_response("Update failed", 500)
         
-        # Format timestamps
-        if result.get("created_at"):
-            result["created_at"] = result["created_at"].isoformat()
-        if result.get("updated_at"):
-            result["updated_at"] = result["updated_at"].isoformat()
+        # 🔥 FIX: Serialize time objects before JSON response
+        result = serialize_agent_data(result)
         
         # Add presigned URL
         add_presigned_urls_to_agent(result)
@@ -1080,7 +1178,8 @@ async def livekit_webhook(request: Request):
                      "egress_updated", "track_published", "track_unpublished"]:
             return JSONResponse({"message": f"{event} logged"})
 
-        # Handle room end
+        # Handle room end WITHOUT calculating duration
+        # Duration will come from agent via save-call-data endpoint
         if event in ["room_finished", "participant_left"]:
             await asyncio.sleep(0.5)
             
@@ -1088,7 +1187,7 @@ async def livekit_webhook(request: Request):
             try:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT status, events_log, started_at, created_at, agent_id
+                        SELECT status, events_log, agent_id, duration
                         FROM call_history WHERE call_id = %s
                     """, (call_id,))
                     row = cursor.fetchone()
@@ -1098,59 +1197,32 @@ async def livekit_webhook(request: Request):
             if not row:
                 return JSONResponse({"message": "Call not found"})
 
-            current_status, events_log, db_started_at, created_at, agent_id = row
+            current_status, events_log, agent_id, existing_duration = row
             
             # Skip if already final
             if current_status in {"completed", "unanswered"}:
-                # Just update duration
-                started = db_started_at or created_at
-                ended = datetime.now(timezone.utc)
-                duration = (ended - started).total_seconds() if started else 0
-                
-                db.update_call_history(call_id, {
-                    "duration": max(0, duration),
-                    "ended_at": ended
-                })
-                
-                # 🔥 NEW: Update agent's used_minutes
-                if agent_id and duration > 0:
-                    duration_minutes = duration / 60
-                    try:
-                        db.update_agent_used_minutes(agent_id, duration_minutes)
-                        logging.info(
-                            f"✅ Agent {agent_id} minutes updated: +{duration_minutes:.2f} min"
-                        )
-                    except Exception as e:
-                        logging.error(f"❌ Failed to update agent minutes: {e}")
-                
-                return JSONResponse({"message": "Duration updated"})
+                logging.info(f"ℹ️ Call {call_id} already finalized, skipping webhook processing")
+                return JSONResponse({"message": "Already finalized"})
 
-            # Determine final status
             answered = check_if_answered(events_log)
             final_status = "completed" if answered else "unanswered"
             
-            started = db_started_at or created_at
-            ended = datetime.now(timezone.utc)
-            duration = (ended - started).total_seconds() if (answered and started) else 0
-
-            db.update_call_history(call_id, {
+            # Don't calculate duration here - it will come from agent
+            updates = {
                 "status": final_status,
-                "duration": max(0, duration),
-                "ended_at": ended,
-                "started_at": started
-            })
+                "ended_at": datetime.now(timezone.utc)
+            }
             
-            # 🔥 NEW: Update agent's used_minutes ONLY if call was completed
-            if agent_id and final_status == "completed" and duration > 0:
-                duration_minutes = duration / 60
-                try:
-                    db.update_agent_used_minutes(agent_id, duration_minutes)
-                    logging.info(
-                        f"✅ Agent {agent_id} minutes updated: +{duration_minutes:.2f} min "
-                        f"(call {call_id})"
-                    )
-                except Exception as e:
-                    logging.error(f"❌ Failed to update agent minutes: {e}")
+            # Only set duration to 0 for unanswered calls
+            if final_status == "unanswered":
+                updates["duration"] = 0
+            
+            db.update_call_history(call_id, updates)
+            
+            logging.info(
+                f"✅ Call {call_id} marked as {final_status}. "
+                f"Duration will be set by agent."
+            )
             
             return JSONResponse({"message": f"Call ended: {final_status}"})
 
@@ -1172,6 +1244,8 @@ async def livekit_webhook(request: Request):
         logging.error(f"Webhook error: {e}")
         traceback.print_exc()
         return JSONResponse({"error": str(e)}, status_code=500)
+    
+
 
 @router.get("/agents/by-owner/{owner_name}")
 async def get_agents_by_owner(
@@ -1841,3 +1915,43 @@ async def reset_agent_minutes(
         logging.error(f"Error resetting agent minutes: {e}")
         traceback.print_exc()
         return error_response("Failed to reset minutes", 500)
+    
+
+@router.post("/contact-form")
+async def submit_contact_form(request: ContactFormRequest):
+    """
+    PUBLIC endpoint - Handle contact form submissions from website
+    Sends email to business with customer details
+    No authentication required
+    """
+    try:
+        BUSINESS_EMAIL = os.getenv("BUSINESS_EMAIL", "info@mrbot-ki.de")
+        
+        if not request.first_name or not request.last_name or not request.email:
+            return error_response("First name, last name, and email are required", 400)
+        
+        # Send email to business
+        mail_obj = Send_Mail()
+        email_sent = await mail_obj.send_contact_form_email(
+            first_name=request.first_name,
+            last_name=request.last_name,
+            customer_email=request.email,
+            customer_message=request.message,
+            recipient_email=BUSINESS_EMAIL
+        )
+        
+        if not email_sent:
+            logging.error(f"Failed to send contact form email from {request.email}")
+            return error_response("Failed to send message. Please try again.", 500)
+        
+        logging.info(f"✅ Contact form submitted by {request.first_name} {request.last_name} ({request.email})")
+        
+        return JSONResponse({
+            "success": True,
+            "message": "Thank you for contacting us! We'll get back to you soon."
+        })
+        
+    except Exception as e:
+        logging.error(f"Error processing contact form: {e}")
+        traceback.print_exc()
+        return error_response("Failed to submit contact form", 500)

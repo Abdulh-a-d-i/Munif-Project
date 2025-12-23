@@ -460,3 +460,33 @@ class HetznerAvatarStorage:
 
 # Replace singleton
 hetzner_storage = HetznerAvatarStorage()  
+
+
+def serialize_agent_data(agent: dict) -> dict:
+    """
+    Convert Python time/datetime/Decimal objects to JSON-serializable types.
+    Handles nested dictionaries and lists.
+    Modifies agent dict in-place and returns it.
+    """
+    from decimal import Decimal
+    from datetime import time, datetime, date
+    
+    def convert_value(value):
+        """Recursively convert non-serializable types"""
+        if isinstance(value, Decimal):
+            return float(value)
+        elif isinstance(value, time):
+            return value.strftime("%H:%M")
+        elif isinstance(value, (datetime, date)):
+            return value.isoformat()
+        elif isinstance(value, dict):
+            return {k: convert_value(v) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [convert_value(item) for item in value]
+        return value
+    
+    # Convert all fields recursively
+    for key, value in list(agent.items()):
+        agent[key] = convert_value(value)
+    
+    return agent

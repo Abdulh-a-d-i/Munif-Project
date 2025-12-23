@@ -337,3 +337,179 @@ END:VCALENDAR
         except Exception as e:
             logging.error(f"❌ Error sending owner notification: {e}")
             return False
+
+
+    async def send_contact_form_email(
+        self,
+        first_name: str,
+        last_name: str,
+        customer_email: str,
+        customer_message: str = None,
+        recipient_email: str = "info@mrbot-ki.de"
+    ):
+        """
+        Send contact form submission to business email.
+        Form fields: First Name, Last Name, Email, Message
+        """
+        try:
+            full_name = f"{first_name} {last_name}".strip()
+            subject = f"📬 Contact Form Submission - {full_name}"
+            
+            # Build plain text version
+            plain_body = f"""
+    New Contact Form Submission
+
+    Customer Details:
+    ─────────────────
+    Name: {full_name}
+    Email: {customer_email}
+
+    Message:
+    ─────────────────
+    {customer_message or 'No message provided'}
+
+    ─────────────────
+    This email was sent from your website contact form.
+    Please respond directly to: {customer_email}
+    """
+            
+            html_body = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                max-width: 600px;
+                margin: 0 auto;
+            }}
+            .header {{
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 30px;
+                text-align: center;
+                border-radius: 8px 8px 0 0;
+            }}
+            .content {{
+                background: #f9fafb;
+                padding: 30px;
+                border: 1px solid #e5e7eb;
+            }}
+            .section {{
+                background: white;
+                padding: 20px;
+                margin-bottom: 20px;
+                border-radius: 8px;
+                border-left: 4px solid #667eea;
+            }}
+            .section-title {{
+                color: #667eea;
+                font-size: 16px;
+                font-weight: bold;
+                margin-bottom: 15px;
+                text-transform: uppercase;
+            }}
+            .info-row {{
+                display: flex;
+                padding: 8px 0;
+                border-bottom: 1px solid #f3f4f6;
+            }}
+            .info-row:last-child {{
+                border-bottom: none;
+            }}
+            .info-label {{
+                font-weight: bold;
+                color: #6b7280;
+                min-width: 100px;
+            }}
+            .info-value {{
+                color: #1f2937;
+                flex: 1;
+            }}
+            .message-box {{
+                background: #f9fafb;
+                padding: 15px;
+                border-radius: 6px;
+                border: 1px solid #e5e7eb;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+            }}
+            .footer {{
+                background: #1f2937;
+                color: #9ca3af;
+                padding: 20px;
+                text-align: center;
+                font-size: 14px;
+                border-radius: 0 0 8px 8px;
+            }}
+            .reply-button {{
+                display: inline-block;
+                background: #667eea;
+                color: white;
+                padding: 12px 30px;
+                text-decoration: none;
+                border-radius: 6px;
+                margin-top: 20px;
+                font-weight: bold;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1 style="margin: 0;">📬 New Contact Form Submission</h1>
+            <p style="margin: 10px 0 0 0; opacity: 0.9;">Someone reached out through your website</p>
+        </div>
+        
+        <div class="content">
+            <div class="section">
+                <div class="section-title">👤 Customer Information</div>
+                <div class="info-row">
+                    <span class="info-label">Name:</span>
+                    <span class="info-value">{full_name}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Email:</span>
+                    <span class="info-value"><a href="mailto:{customer_email}" style="color: #667eea; text-decoration: none;">{customer_email}</a></span>
+                </div>
+            </div>
+            
+            <div class="section">
+                <div class="section-title">💬 Message</div>
+                <div class="message-box">
+                    {customer_message or '<em>No message provided</em>'}
+                </div>
+            </div>
+            
+            <div style="text-align: center;">
+                <a href="mailto:{customer_email}" class="reply-button">Reply to Customer</a>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p style="margin: 0;">This email was automatically generated from your website contact form.</p>
+            <p style="margin: 10px 0 0 0;">Please respond directly to <strong>{customer_email}</strong></p>
+        </div>
+    </body>
+    </html>
+    """
+            
+            # Send email
+            success = await self.send_email(
+                to_email=recipient_email,
+                subject=subject,
+                html_body=html_body,
+                plain_body=plain_body
+            )
+            
+            if success:
+                logging.info(f"📧 Contact form email sent to {recipient_email} from {customer_email}")
+            else:
+                logging.error(f"❌ Failed to send contact form email from {customer_email}")
+            
+            return success
+            
+        except Exception as e:
+            logging.error(f"❌ Error sending contact form email: {e}")
+            return False

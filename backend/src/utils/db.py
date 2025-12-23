@@ -138,13 +138,17 @@ class PGDB:
                 return cursor.fetchall()
 
     def delete_agent(self, agent_id: int, admin_id: int):
-        """Delete agent (soft delete by setting is_active=False)"""
+        """Delete agent (soft delete by setting is_active=False and freeing phone number)"""
         with self.get_connection_context() as conn:
             try:
                 with conn.cursor() as cursor:
+                    # Soft delete + free the phone number for reuse
                     cursor.execute("""
                         UPDATE agents 
-                        SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+                        SET 
+                            is_active = FALSE, 
+                            phone_number = phone_number || '_deleted_' || EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::TEXT,
+                            updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s AND admin_id = %s
                         RETURNING id;
                     """, (agent_id, admin_id))
@@ -552,6 +556,12 @@ class PGDB:
                             a.is_active,
                             a.created_at,
                             a.updated_at,
+                            a.owner_name,
+                            a.owner_email,
+                            a.business_hours_start,
+                            a.business_hours_end,
+                            a.allowed_minutes,
+                            COALESCE(a.used_minutes, 0) as used_minutes,
                             COUNT(ch.id) as total_calls,
                             COUNT(CASE WHEN ch.status = 'completed' THEN 1 END) as completed_calls,
                             COUNT(CASE WHEN ch.status = 'unanswered' THEN 1 END) as unanswered_calls,
@@ -571,12 +581,20 @@ class PGDB:
                     for agent in agents:
                         agent["avg_duration"] = round(float(agent["avg_duration"]), 1)
                         agent["total_duration"] = round(float(agent["total_duration"]), 1)
+                        agent["used_minutes"] = round(float(agent["used_minutes"]), 2)
+                        
                         if agent["created_at"]:
                             agent["created_at"] = agent["created_at"].isoformat()
                         if agent["updated_at"]:
                             agent["updated_at"] = agent["updated_at"].isoformat()
                         if agent["last_call_at"]:
                             agent["last_call_at"] = agent["last_call_at"].isoformat()
+                        
+                        # Format time fields
+                        if agent.get("business_hours_start"):
+                            agent["business_hours_start"] = str(agent["business_hours_start"])
+                        if agent.get("business_hours_end"):
+                            agent["business_hours_end"] = str(agent["business_hours_end"])
                     
                     return agents
             except Exception as e:
@@ -751,6 +769,11 @@ class PGDB:
                             a.created_at,
                             a.updated_at,
                             a.owner_name,
+                            a.owner_email,
+                            a.business_hours_start,
+                            a.business_hours_end,
+                            a.allowed_minutes,
+                            COALESCE(a.used_minutes, 0) as used_minutes,
                             COUNT(ch.id) as total_calls,
                             COUNT(CASE WHEN ch.status = 'completed' THEN 1 END) as completed_calls,
                             COUNT(CASE WHEN ch.status = 'unanswered' THEN 1 END) as unanswered_calls,
@@ -771,12 +794,20 @@ class PGDB:
                     for agent in agents:
                         agent["avg_duration"] = round(float(agent["avg_duration"]), 1)
                         agent["total_duration"] = round(float(agent["total_duration"]), 1)
+                        agent["used_minutes"] = round(float(agent["used_minutes"]), 2)
+                        
                         if agent["created_at"]:
                             agent["created_at"] = agent["created_at"].isoformat()
                         if agent["updated_at"]:
                             agent["updated_at"] = agent["updated_at"].isoformat()
                         if agent["last_call_at"]:
                             agent["last_call_at"] = agent["last_call_at"].isoformat()
+                        
+                        # Format time fields
+                        if agent.get("business_hours_start"):
+                            agent["business_hours_start"] = str(agent["business_hours_start"])
+                        if agent.get("business_hours_end"):
+                            agent["business_hours_end"] = str(agent["business_hours_end"])
                     
                     return {
                         "agents": agents,
@@ -809,6 +840,11 @@ class PGDB:
                             a.language,
                             a.industry,
                             a.owner_name,
+                            a.owner_email,
+                            a.business_hours_start,
+                            a.business_hours_end,
+                            a.allowed_minutes,
+                            COALESCE(a.used_minutes, 0) as used_minutes,
                             a.avatar_url,  
                             COUNT(ch.id) as total_calls,
                             COUNT(CASE WHEN ch.status = 'completed' THEN 1 END) as completed_calls,
@@ -827,15 +863,22 @@ class PGDB:
                     
                     for agent in agents:
                         agent["avg_duration"] = round(float(agent["avg_duration"]), 1)
+                        agent["used_minutes"] = round(float(agent["used_minutes"]), 2)
+                        
                         if agent["last_call_at"]:
                             agent["last_call_at"] = agent["last_call_at"].isoformat()
+                        
+                        # Format time fields
+                        if agent.get("business_hours_start"):
+                            agent["business_hours_start"] = str(agent["business_hours_start"])
+                        if agent.get("business_hours_end"):
+                            agent["business_hours_end"] = str(agent["business_hours_end"])
                     
                     return agents
                     
             except Exception as e:
                 logging.error(f"Error fetching top agents: {e}")
                 raise
-           
 
 
     def get_agent_detail_with_calls(self, agent_id: int, admin_id: int, calls_page: int = 1, calls_page_size: int = 10):
