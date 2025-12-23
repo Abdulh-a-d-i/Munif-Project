@@ -39,6 +39,8 @@ class PGDB:
         self.create_agents_table()
         self.create_call_history_table()
         self.create_voice_samples_table()
+        self.create_subscriptions_table()
+        self.create_appointments_table()
         self.add_agent_fields_if_not_exists()
 
     def get_connection(self):
@@ -1276,7 +1278,254 @@ class PGDB:
                     ORDER BY voice_name
                 """, (language,))
                 return cursor.fetchall()
-            
+        
+ # ==================== SUBSCRIPTIONS TABLE ====================
+    def create_subscriptions_table(self):
+        """Create subscriptions table to manage user subscription cycles"""
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS subscriptions (
+                            id SERIAL PRIMARY KEY,
+                            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                            total_minutes_allocated INTEGER NOT NULL DEFAULT 0,
+                            minutes_used DECIMAL(10, 2) DEFAULT 0,
+                            cycle_start_date TIMESTAMPTZ NOT NULL,
+                            cycle_end_date TIMESTAMPTZ NOT NULL,
+                            status VARCHAR(20) DEFAULT 'Active' CHECK (status IN ('Active', 'Expired')),
+                            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id 
+                        ON subscriptions(user_id);
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_subscriptions_status 
+                        ON subscriptions(status);
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_subscriptions_cycle_dates 
+                        ON subscriptions(cycle_start_date, cycle_end_date);
+                    """)
+                conn.commit()
+                logging.info("✅ subscriptions table created")
+            except Exception as e:
+                logging.error(f"Error creating subscriptions table: {e}")
+
+    def create_subscription(self, subscription_data: dict):
+        """Create a new subscription for a user"""
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute("""
+                        INSERT INTO subscriptions (
+                            user_id, total_minutes_allocated, minutes_used,
+                            cycle_start_date, cycle_end_date, status
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING *;
+                    """, (
+                        subscription_data['user_id'],
+                        subscription_data.get('total_minutes_allocated', 0),
+                        subscription_data.get('minutes_used', 0),
+                        subscription_data['cycle_start_date'],
+                        subscription_data['cycle_end_date'],
+                        subscription_data.get('status', 'Active')
+                    ))
+                    result = cursor.fetchone()
+                conn.commit()
+                logging.info(f"✅ Created subscription {result['id']} for user {subscription_data['user_id']}")
+                return result
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error creating subscription: {e}")
+                raise
+
+    def get_subscription_by_user(self, user_id: int):
+        """Get active subscription for a user"""
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT * FROM subscriptions
+                    WHERE user_id = %s AND status = 'Active'
+                    ORDER BY cycle_start_date DESC
+                    LIMIT 1
+                """, (user_id,))
+                return cursor.fetchone()
+
+    def update_subscription_minutes(self, subscription_id: int, minutes_to_add: float):
+        """Update minutes used in a subscription"""
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute("""
+                        UPDATE subscriptions
+                        SET minutes_used = minutes_used + %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING *;
+                    """, (round(minutes_to_add, 2), subscription_id))
+                    result = cursor.fetchone()
+                conn.commit()
+                logging.info(f"✅ Updated subscription {subscription_id} minutes")
+                return result
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error updating subscription minutes: {e}")
+                raise
+
+    def expire_subscription(self, subscription_id: int):
+        """Mark a subscription as expired"""
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        UPDATE subscriptions
+                        SET status = 'Expired',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING id;
+                    """, (subscription_id,))
+                    result = cursor.fetchone()
+                conn.commit()
+                logging.info(f"✅ Expired subscription {subscription_id}")
+                return bool(result)
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error expiring subscription: {e}")
+                raise
+
+    # ==================== APPOINTMENTS TABLE ====================
+    def create_appointments_table(self):
+        """Create appointments table to manage scheduled calls"""
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS appointments (
+                            id SERIAL PRIMARY KEY,
+                            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                            call_id TEXT REFERENCES call_history(call_id) ON DELETE SET NULL,
+                            customer_name VARCHAR(255) NOT NULL,
+                            scheduled_time TIMESTAMPTZ NOT NULL,
+                            notes TEXT,
+                            status VARCHAR(20) DEFAULT 'Scheduled' CHECK (status IN ('Scheduled', 'Cancelled', 'Completed')),
+                            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_appointments_user_id 
+                        ON appointments(user_id);
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_appointments_call_id 
+                        ON appointments(call_id);
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_appointments_status 
+                        ON appointments(status);
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_appointments_scheduled_time 
+                        ON appointments(scheduled_time);
+                    """)
+                conn.commit()
+                logging.info("✅ appointments table created")
+            except Exception as e:
+                logging.error(f"Error creating appointments table: {e}")
+
+    def create_appointment(self, appointment_data: dict):
+        """Create a new appointment"""
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute("""
+                        INSERT INTO appointments (
+                            user_id, call_id, customer_name, scheduled_time, notes, status
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING *;
+                    """, (
+                        appointment_data['user_id'],
+                        appointment_data.get('call_id'),
+                        appointment_data['customer_name'],
+                        appointment_data['scheduled_time'],
+                        appointment_data.get('notes'),
+                        appointment_data.get('status', 'Scheduled')
+                    ))
+                    result = cursor.fetchone()
+                conn.commit()
+                logging.info(f"✅ Created appointment {result['id']} for user {appointment_data['user_id']}")
+                return result
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error creating appointment: {e}")
+                raise
+
+    def get_appointments_by_user(self, user_id: int, status: str = None):
+        """Get appointments for a user, optionally filtered by status"""
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                if status:
+                    cursor.execute("""
+                        SELECT * FROM appointments
+                        WHERE user_id = %s AND status = %s
+                        ORDER BY scheduled_time DESC
+                    """, (user_id, status))
+                else:
+                    cursor.execute("""
+                        SELECT * FROM appointments
+                        WHERE user_id = %s
+                        ORDER BY scheduled_time DESC
+                    """, (user_id,))
+                return cursor.fetchall()
+
+    def update_appointment_status(self, appointment_id: int, status: str):
+        """Update appointment status"""
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute("""
+                        UPDATE appointments
+                        SET status = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING *;
+                    """, (status, appointment_id))
+                    result = cursor.fetchone()
+                conn.commit()
+                logging.info(f"✅ Updated appointment {appointment_id} status to {status}")
+                return result
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error updating appointment status: {e}")
+                raise
+
+    def link_appointment_to_call(self, appointment_id: int, call_id: str):
+        """Link an appointment to a call_id"""
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute("""
+                        UPDATE appointments
+                        SET call_id = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING *;
+                    """, (call_id, appointment_id))
+                    result = cursor.fetchone()
+                conn.commit()
+                logging.info(f"✅ Linked appointment {appointment_id} to call {call_id}")
+                return result
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error linking appointment to call: {e}")
+                raise
+
     def add_agent_fields_if_not_exists(self):
         """
         Add new fields to agents table if they don't exist:
