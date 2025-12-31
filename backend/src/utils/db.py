@@ -41,6 +41,7 @@ class PGDB:
         self.create_voice_samples_table()
         self.create_subscriptions_table()
         self.create_appointments_table()
+        self.create_user_agent_status_table()
         self.add_agent_fields_if_not_exists()
 
     def get_connection(self):
@@ -260,6 +261,135 @@ class PGDB:
                     (user_id,)
                 )
                 return cursor.fetchone()
+
+    # ==================== USER AGENT STATUS ====================
+    def create_user_agent_status_table(self):
+        """Create user_agent_status table to track agent activation per user"""
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS user_agent_status (
+                            id SERIAL PRIMARY KEY,
+                            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                            agent_id INTEGER REFERENCES agents(id) ON DELETE CASCADE,
+                            is_active BOOLEAN DEFAULT TRUE,
+                            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(user_id, agent_id)
+                        );
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_user_agent_status_user 
+                        ON user_agent_status(user_id);
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_user_agent_status_agent 
+                        ON user_agent_status(agent_id);
+                    """)
+                conn.commit()
+                logging.info("✅ user_agent_status table created")
+            except Exception as e:
+                logging.error(f"Error creating user_agent_status table: {e}")
+
+    def toggle_agent_status_for_user(self, user_id: int, agent_id: int, is_active: bool):
+        """
+        Toggle agent active/inactive status for a specific user.
+        Creates a new record if it doesn't exist, updates if it does.
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    # First verify the agent exists and belongs to this user (admin)
+                    cursor.execute("""
+                        SELECT id FROM agents 
+                        WHERE id = %s AND admin_id = %s
+                    """, (agent_id, user_id))
+                    
+                    if not cursor.fetchone():
+                        raise ValueError("Agent not found or access denied")
+                    
+                    # Insert or update the status
+                    cursor.execute("""
+                        INSERT INTO user_agent_status (user_id, agent_id, is_active, updated_at)
+                        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id, agent_id) 
+                        DO UPDATE SET 
+                            is_active = EXCLUDED.is_active,
+                            updated_at = CURRENT_TIMESTAMP
+                        RETURNING id, is_active;
+                    """, (user_id, agent_id, is_active))
+                    
+                    result = cursor.fetchone()
+                conn.commit()
+                
+                logging.info(
+                    f"✅ Agent {agent_id} status updated for user {user_id}: "
+                    f"{'active' if is_active else 'inactive'}"
+                )
+                
+                return {
+                    "id": result["id"],
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "is_active": result["is_active"]
+                }
+                
+            except ValueError as ve:
+                conn.rollback()
+                raise ve
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error toggling agent status: {e}")
+                raise
+
+    def get_agent_status_for_user(self, user_id: int, agent_id: int):
+        """Get the activation status of an agent for a specific user"""
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT is_active, updated_at
+                    FROM user_agent_status
+                    WHERE user_id = %s AND agent_id = %s
+                """, (user_id, agent_id))
+                
+                result = cursor.fetchone()
+                
+                # If no record exists, agent is active by default
+                if not result:
+                    return {"is_active": True, "updated_at": None}
+                
+                return {
+                    "is_active": result["is_active"],
+                    "updated_at": result["updated_at"].isoformat() if result["updated_at"] else None
+                }
+
+    def get_all_agent_statuses_for_user(self, user_id: int):
+        """Get activation status of all agents for a specific user"""
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        a.id as agent_id,
+                        a.agent_name,
+                        a.phone_number,
+                        COALESCE(uas.is_active, TRUE) as is_active,
+                        uas.updated_at
+                    FROM agents a
+                    LEFT JOIN user_agent_status uas 
+                        ON a.id = uas.agent_id AND uas.user_id = %s
+                    WHERE a.admin_id = %s AND a.is_active = TRUE
+                    ORDER BY a.created_at DESC
+                """, (user_id, user_id))
+                
+                results = cursor.fetchall()
+                
+                for result in results:
+                    if result["updated_at"]:
+                        result["updated_at"] = result["updated_at"].isoformat()
+                
+                return results
+
 
     # ==================== CALL HISTORY ====================
     def create_call_history_table(self):
@@ -498,6 +628,114 @@ class PGDB:
             except Exception as e:
                 logging.error(f"Error fetching call history for admin_id={admin_id}: {e}")
                 raise
+
+    def get_call_logs_with_filters(
+        self, 
+        admin_id: int, 
+        page: int = 1, 
+        page_size: int = 25,
+        search: str = None,
+        status_filter: str = None,
+        date_from: str = None,
+        date_to: str = None
+    ):
+        """
+        Get paginated call logs with search and filters for call logs page.
+        Supports:
+        - Search by caller number or name
+        - Filter by status (completed, unanswered, etc.)
+        - Filter by date range
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    # Build WHERE clauses
+                    where_clauses = ["a.admin_id = %s"]
+                    params = [admin_id]
+                    
+                    # Search filter
+                    if search:
+                        where_clauses.append("(ch.caller_number ILIKE %s OR ch.summary ILIKE %s)")
+                        search_pattern = f"%{search}%"
+                        params.extend([search_pattern, search_pattern])
+                    
+                    # Status filter
+                    if status_filter and status_filter.lower() != 'all':
+                        where_clauses.append("ch.status = %s")
+                        params.append(status_filter.lower())
+                    
+                    # Date range filter
+                    if date_from:
+                        where_clauses.append("ch.created_at >= %s")
+                        params.append(date_from)
+                    
+                    if date_to:
+                        where_clauses.append("ch.created_at <= %s")
+                        params.append(date_to)
+                    
+                    where_sql = " AND ".join(where_clauses)
+                    
+                    # Count total records with filters
+                    count_sql = f"""
+                        SELECT COUNT(*) FROM call_history ch
+                        JOIN agents a ON ch.agent_id = a.id
+                        WHERE {where_sql}
+                    """
+                    cursor.execute(count_sql, tuple(params))
+                    total = cursor.fetchone()["count"]
+                    
+                    # Count by status
+                    cursor.execute(f"""
+                        SELECT 
+                            COUNT(CASE WHEN ch.status = 'completed' THEN 1 END) as completed_calls,
+                            COUNT(CASE WHEN ch.status = 'unanswered' THEN 1 END) as unanswered_calls,
+                            COUNT(CASE WHEN ch.status NOT IN ('completed', 'unanswered') THEN 1 END) as other_calls
+                        FROM call_history ch
+                        JOIN agents a ON ch.agent_id = a.id
+                        WHERE {where_sql}
+                    """, tuple(params))
+                    status_counts = cursor.fetchone()
+                    
+                    # Paginated query
+                    offset = (page - 1) * page_size
+                    data_params = params + [page_size, offset]
+                    
+                    cursor.execute(f"""
+                        SELECT 
+                            ch.*,
+                            a.agent_name,
+                            a.phone_number as agent_phone
+                        FROM call_history ch
+                        JOIN agents a ON ch.agent_id = a.id
+                        WHERE {where_sql}
+                        ORDER BY ch.created_at DESC
+                        LIMIT %s OFFSET %s
+                    """, tuple(data_params))
+                    
+                    rows = cursor.fetchall()
+                    
+                    # Parse transcripts
+                    for row in rows:
+                        if isinstance(row.get("transcript"), str):
+                            try:
+                                row["transcript"] = json.loads(row["transcript"])
+                            except Exception:
+                                pass
+                    
+                    return {
+                        "calls": rows,
+                        "total": total,
+                        "completed_calls": status_counts["completed_calls"],
+                        "unanswered_calls": status_counts["unanswered_calls"],
+                        "other_calls": status_counts["other_calls"],
+                        "page": page,
+                        "page_size": page_size,
+                        "total_pages": (total + page_size - 1) // page_size
+                    }
+            except Exception as e:
+                logging.error(f"Error fetching call logs for admin_id={admin_id}: {e}")
+                raise
+
 
     def get_call_by_id(self, call_id: str, agent_id: int = None):
         """Get a specific call by ID"""
@@ -1398,6 +1636,72 @@ class PGDB:
                 logging.error(f"Error expiring subscription: {e}")
                 raise
 
+    def get_user_plan_usage(self, user_id: int):
+        """
+        Get user's plan usage statistics for dashboard display.
+        Returns total minutes, used minutes, remaining minutes, percentage used,
+        and days until reset.
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        id,
+                        total_minutes_allocated,
+                        minutes_used,
+                        cycle_start_date,
+                        cycle_end_date,
+                        status
+                    FROM subscriptions
+                    WHERE user_id = %s AND status = 'Active'
+                    ORDER BY cycle_start_date DESC
+                    LIMIT 1
+                """, (user_id,))
+                
+                subscription = cursor.fetchone()
+                
+                # If no active subscription, return default values
+                if not subscription:
+                    return {
+                        "has_subscription": False,
+                        "total_minutes": 0,
+                        "used_minutes": 0,
+                        "remaining_minutes": 0,
+                        "percentage_used": 0,
+                        "days_until_reset": None,
+                        "cycle_end_date": None,
+                        "status": "No Active Plan"
+                    }
+                
+                # Calculate statistics
+                total_minutes = float(subscription["total_minutes_allocated"])
+                used_minutes = float(subscription["minutes_used"])
+                remaining_minutes = max(0, total_minutes - used_minutes)
+                percentage_used = round((used_minutes / total_minutes * 100) if total_minutes > 0 else 0, 1)
+                
+                # Calculate days until reset
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                cycle_end = subscription["cycle_end_date"]
+                
+                # Ensure cycle_end is timezone-aware
+                if cycle_end.tzinfo is None:
+                    cycle_end = cycle_end.replace(tzinfo=timezone.utc)
+                
+                days_until_reset = (cycle_end - now).days
+                
+                return {
+                    "has_subscription": True,
+                    "total_minutes": int(total_minutes),
+                    "used_minutes": round(used_minutes, 2),
+                    "remaining_minutes": round(remaining_minutes, 2),
+                    "percentage_used": percentage_used,
+                    "days_until_reset": max(0, days_until_reset),
+                    "cycle_end_date": cycle_end.isoformat(),
+                    "status": "Active"
+                }
+
+
     # ==================== APPOINTMENTS TABLE ====================
     def create_appointments_table(self):
         """Create appointments table to manage scheduled calls"""
@@ -1483,6 +1787,27 @@ class PGDB:
                         ORDER BY scheduled_time DESC
                     """, (user_id,))
                 return cursor.fetchall()
+
+    def get_appointment_by_call_id(self, call_id: str):
+        """Get appointment associated with a specific call"""
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT * FROM appointments
+                    WHERE call_id = %s
+                    LIMIT 1
+                """, (call_id,))
+                result = cursor.fetchone()
+                
+                if result and result.get("scheduled_time"):
+                    result["scheduled_time"] = result["scheduled_time"].isoformat()
+                if result and result.get("created_at"):
+                    result["created_at"] = result["created_at"].isoformat()
+                if result and result.get("updated_at"):
+                    result["updated_at"] = result["updated_at"].isoformat()
+                
+                return result
+
 
     def update_appointment_status(self, appointment_id: int, status: str):
         """Update appointment status"""

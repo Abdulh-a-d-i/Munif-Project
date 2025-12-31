@@ -159,3 +159,17 @@ class ContactFormRequest(BaseModel):
     last_name: str
     email: EmailStr
     message: Optional[str] = None
+
+
+class ToggleAgentStatusRequest(BaseModel):
+    """Request model for toggling agent active/inactive status for a user"""
+    agent_id: int = Field(..., gt=0)
+    is_active: bool = Field(...)
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "agent_id": 5,
+                "is_active": True
+            }
+        }

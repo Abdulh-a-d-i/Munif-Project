@@ -34,7 +34,8 @@ from src.api.base_models import (
     CreateAgentRequest,
     ResetPasswordRequest,
     ForgotPasswordRequest,
-    ContactFormRequest
+    ContactFormRequest,
+    ToggleAgentStatusRequest
 )
 from src.utils.db import PGDB 
 from src.utils.mail_management import Send_Mail
@@ -144,6 +145,34 @@ def login_user(user: UserLogin):
     except Exception as e:
         logging.error(f"Error during login: {str(e)}")
         return error_response(f"Internal server error: {str(e)}", status_code=500)
+
+# ==================== USER PLAN USAGE ====================
+@router.get("/user/plan-usage")
+async def get_user_plan_usage(current_user: dict = Depends(get_current_user)):
+    """
+    Get user's plan usage statistics for dashboard display.
+    Shows total minutes, used minutes, remaining minutes, percentage used,
+    and days until reset.
+    """
+    try:
+        user_id = current_user["id"]
+        
+        # Get plan usage statistics
+        plan_usage = db.get_user_plan_usage(user_id)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "data": plan_usage
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f"Error fetching plan usage: {e}")
+        traceback.print_exc()
+        return error_response("Failed to fetch plan usage", 500)
+
 
 # ==================== CALL STATUS ====================
 @router.get("/call-status/{call_id}")
@@ -1111,13 +1140,225 @@ async def delete_agent(
         traceback.print_exc()
         return error_response("Failed to delete agent", 500)
 
+@router.post("/agents/toggle-status")
+async def toggle_agent_status(
+    request: ToggleAgentStatusRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Toggle agent active/inactive status for the current user.
+    When user presses active/inactive button, this updates their personal
+    activation status for the agent.
+    """
+    try:
+        user_id = current_user["id"]
+        agent_id = request.agent_id
+        is_active = request.is_active
+        
+        # Toggle the status in the database
+        result = db.toggle_agent_status_for_user(user_id, agent_id, is_active)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "message": f"Agent {'activated' if is_active else 'deactivated'} successfully",
+                "data": result
+            }
+        )
+        
+    except ValueError as e:
+        return error_response(str(e), 404)
+    except Exception as e:
+        logging.error(f"Error toggling agent status: {e}")
+        traceback.print_exc()
+        return error_response("Failed to toggle agent status", 500)
+
+@router.get("/agents/{agent_id}/status")
+async def get_agent_status(
+    agent_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get the activation status of a specific agent for the current user.
+    """
+    try:
+        user_id = current_user["id"]
+        
+        # Get the status
+        status = db.get_agent_status_for_user(user_id, agent_id)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "data": {
+                    "agent_id": agent_id,
+                    **status
+                }
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f"Error getting agent status: {e}")
+        traceback.print_exc()
+        return error_response("Failed to get agent status", 500)
+
+@router.get("/agents/statuses/all")
+async def get_all_agent_statuses(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get activation status of all agents for the current user.
+    """
+    try:
+        user_id = current_user["id"]
+        
+        # Get all agent statuses
+        statuses = db.get_all_agent_statuses_for_user(user_id)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "data": statuses
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f"Error getting all agent statuses: {e}")
+        traceback.print_exc()
+        return error_response("Failed to get agent statuses", 500)
+
+
+# ==================== CALL LOGS ====================
+@router.get("/call-logs")
+async def get_call_logs(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get call logs with search and filters for the call logs page.
+    
+    Query Parameters:
+    - page: Page number (default: 1)
+    - page_size: Items per page (default: 25, max: 100)
+    - search: Search by caller ID or name
+    - status: Filter by status (completed, unanswered, all)
+    - date_from: Filter from date (ISO format)
+    - date_to: Filter to date (ISO format)
+    """
+    try:
+        user_id = current_user["id"]
+        
+        # Get filtered call logs
+        result = db.get_call_logs_with_filters(
+            admin_id=user_id,
+            page=page,
+            page_size=page_size,
+            search=search,
+            status_filter=status,
+            date_from=date_from,
+            date_to=date_to
+        )
+        
+        # Format calls for response
+        calls = []
+        for call in result.get("calls", []):
+            call_data = {**call}
+            
+            # Format timestamps
+            for field in ["created_at", "started_at", "ended_at"]:
+                if call.get(field):
+                    call_data[field] = call[field].isoformat() if hasattr(call[field], 'isoformat') else str(call[field])
+            
+            # Calculate duration if missing
+            if not call_data.get("duration") and call.get("started_at") and call.get("ended_at"):
+                try:
+                    start = call["started_at"] if isinstance(call["started_at"], datetime) else datetime.fromisoformat(str(call["started_at"]))
+                    end = call["ended_at"] if isinstance(call["ended_at"], datetime) else datetime.fromisoformat(str(call["ended_at"]))
+                    call_data["duration"] = round((end - start).total_seconds(), 1)
+                except:
+                    call_data["duration"] = 0
+            
+            # Format duration for display (e.g., "4m 12s")
+            if call_data.get("duration"):
+                duration_seconds = int(call_data["duration"])
+                minutes = duration_seconds // 60
+                seconds = duration_seconds % 60
+                call_data["duration_formatted"] = f"{minutes}m {seconds:02d}s"
+            else:
+                call_data["duration_formatted"] = "0m 00s"
+            
+            # Parse transcript
+            transcript_text = None
+            if call.get("transcript"):
+                try:
+                    tr = call["transcript"]
+                    if isinstance(tr, str):
+                        tr = json.loads(tr)
+                    if isinstance(tr, list):
+                        lines = []
+                        for msg in tr:
+                            if msg.get("type") == "message":
+                                speaker = "AI" if msg.get("role") == "assistant" else "User"
+                                text = " ".join(msg.get("content", [])) if isinstance(msg.get("content"), list) else str(msg.get("content"))
+                                lines.append(f"{speaker}: {text}")
+                        transcript_text = "\\n".join(lines)
+                except Exception as e:
+                    logging.warning(f"Transcript parse error: {e}")
+            
+            call_data["transcript_text"] = transcript_text
+            call_data["has_recording"] = bool(call.get("recording_blob"))
+            call_data["has_transcript"] = bool(transcript_text)
+            
+            # Add presigned URLs
+            call_data = add_presigned_urls_to_call(call_data)
+            
+            calls.append(call_data)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "data": {
+                    "calls": calls,
+                    "pagination": {
+                        "page": result["page"],
+                        "page_size": result["page_size"],
+                        "total": result["total"],
+                        "total_pages": result["total_pages"],
+                        "completed_calls": result["completed_calls"],
+                        "unanswered_calls": result["unanswered_calls"],
+                        "other_calls": result["other_calls"]
+                    }
+                }
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f"Error fetching call logs: {e}")
+        traceback.print_exc()
+        return error_response("Failed to fetch call logs", 500)
+
+
+
+
 @router.get("/calls/{call_id}")
 async def get_call_details(
     call_id: str,
     agent_id: Optional[int] = Query(None),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get complete call details including metadata"""
+    """
+    Get complete call details including caller information, transcript, 
+    recording, and appointment details for the call details view.
+    """
     try:
         user_id = current_user["id"]
         
@@ -1131,7 +1372,7 @@ async def get_call_details(
         if not agent or agent["admin_id"] != user_id:
             return error_response("Unauthorized", 403)
         
-        # 🔥 FORMAT TIMESTAMPS BEFORE ADDING PRESIGNED URLS
+        # Format timestamps
         for field in ["created_at", "started_at", "ended_at", "updated_at"]:
             if call.get(field):
                 if hasattr(call[field], 'isoformat'):
@@ -1139,8 +1380,54 @@ async def get_call_details(
                 else:
                     call[field] = str(call[field])
         
-        # 🔥 ADD PRESIGNED URLS
+        # Calculate and format duration
+        if call.get("duration"):
+            duration_seconds = int(call["duration"])
+            minutes = duration_seconds // 60
+            seconds = duration_seconds % 60
+            call["duration_formatted"] = f"{minutes}m {seconds:02d}s"
+        else:
+            call["duration_formatted"] = "0m 00s"
+        
+        # Parse transcript with speaker labels
+        transcript_messages = []
+        if call.get("transcript"):
+            try:
+                tr = call["transcript"]
+                if isinstance(tr, str):
+                    tr = json.loads(tr)
+                if isinstance(tr, list):
+                    for msg in tr:
+                        if msg.get("type") == "message":
+                            speaker = "AI" if msg.get("role") == "assistant" else "User"
+                            text = " ".join(msg.get("content", [])) if isinstance(msg.get("content"), list) else str(msg.get("content"))
+                            transcript_messages.append({
+                                "speaker": speaker,
+                                "text": text
+                            })
+            except Exception as e:
+                logging.warning(f"Transcript parse error: {e}")
+        
+        call["transcript_messages"] = transcript_messages
+        call["has_transcript"] = bool(transcript_messages)
+        
+        # Add presigned URLs for recording and transcript
         call = add_presigned_urls_to_call(call)
+        call["has_recording"] = bool(call.get("recording_blob"))
+        
+        # Get appointment details if exists
+        appointment = db.get_appointment_by_call_id(call_id)
+        call["appointment"] = appointment
+        call["has_appointment"] = bool(appointment)
+        
+        # Format caller information
+        caller_info = {
+            "name": call.get("summary") or "Unknown Caller",
+            "phone_number": call.get("caller_number") or "Unknown",
+            "email": None,  # Can be added if stored
+            "preferred_contact": "Phone"
+        }
+        call["caller_info"] = caller_info
         
         return JSONResponse(
             status_code=200,
@@ -1151,8 +1438,9 @@ async def get_call_details(
         )
     except Exception as e:
         logging.error(f"Error fetching call details: {e}")
-        traceback.print_exc()  # Add this to see full error
+        traceback.print_exc()
         return error_response("Failed to fetch call details", 500)
+
 
 @router.post("/livekit-webhook")
 async def livekit_webhook(request: Request):
