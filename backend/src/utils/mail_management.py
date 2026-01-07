@@ -513,3 +513,210 @@ END:VCALENDAR
         except Exception as e:
             logging.error(f"❌ Error sending contact form email: {e}")
             return False
+
+
+    async def send_business_details_to_admin(
+        self,
+        user_email: str,
+        user_name: str,
+        agent_name: str,
+        business_name: str,
+        business_email: str,
+        industry: str,
+        admin_email: str
+    ):
+        """
+        Send new user's business details to admin for review.
+        Includes user registration info and requested business details.
+        """
+        try:
+            from datetime import datetime
+            submission_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            subject = f"🚀 New User Business Details - {business_name}"
+            
+            # Build plain text version
+            plain_body = f"""
+New User Registration - Business Details Submission
+
+User Information:
+─────────────────
+Registration Email: {user_email}
+Username: {user_name}
+Submission Time: {submission_time}
+
+Business Details:
+─────────────────
+Agent Name: {agent_name}
+Business Name: {business_name}
+Business Email: {business_email}
+Industry: {industry}
+
+─────────────────
+This user has completed registration and submitted their business details.
+Please review and consider approving their account for admin access.
+
+To approve this user, update their status in the database:
+UPDATE users SET is_admin = TRUE WHERE email = '{user_email}';
+"""
+            
+            html_body = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+            border-radius: 8px 8px 0 0;
+        }}
+        .content {{
+            background: #f9fafb;
+            padding: 30px;
+            border: 1px solid #e5e7eb;
+        }}
+        .section {{
+            background: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }}
+        .section-title {{
+            color: #667eea;
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+        }}
+        .info-row {{
+            display: flex;
+            padding: 8px 0;
+            border-bottom: 1px solid #f3f4f6;
+        }}
+        .info-row:last-child {{
+            border-bottom: none;
+        }}
+        .info-label {{
+            font-weight: bold;
+            color: #6b7280;
+            min-width: 150px;
+        }}
+        .info-value {{
+            color: #1f2937;
+            flex: 1;
+        }}
+        .footer {{
+            background: #1f2937;
+            color: #9ca3af;
+            padding: 20px;
+            text-align: center;
+            font-size: 14px;
+            border-radius: 0 0 8px 8px;
+        }}
+        .action-box {{
+            background: #fef3c7;
+            border: 2px solid #fbbf24;
+            padding: 15px;
+            border-radius: 6px;
+            margin-top: 20px;
+        }}
+        .code-block {{
+            background: #1f2937;
+            color: #10b981;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            margin-top: 10px;
+            overflow-x: auto;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1 style="margin: 0;">🚀 New User Registration</h1>
+        <p style="margin: 10px 0 0 0; opacity: 0.9;">Business Details Submission</p>
+    </div>
+    
+    <div class="content">
+        <div class="section">
+            <div class="section-title">👤 User Information</div>
+            <div class="info-row">
+                <span class="info-label">Registration Email:</span>
+                <span class="info-value"><a href="mailto:{user_email}" style="color: #667eea; text-decoration: none;">{user_email}</a></span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Username:</span>
+                <span class="info-value">{user_name}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Submission Time:</span>
+                <span class="info-value">{submission_time}</span>
+            </div>
+        </div>
+        
+        <div class="section">
+            <div class="section-title">🏢 Business Details</div>
+            <div class="info-row">
+                <span class="info-label">Agent Name:</span>
+                <span class="info-value"><strong>{agent_name}</strong></span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Business Name:</span>
+                <span class="info-value"><strong>{business_name}</strong></span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Business Email:</span>
+                <span class="info-value"><a href="mailto:{business_email}" style="color: #667eea; text-decoration: none;">{business_email}</a></span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Industry:</span>
+                <span class="info-value">{industry}</span>
+            </div>
+        </div>
+        
+        <div class="action-box">
+            <strong>⚡ Action Required:</strong>
+            <p style="margin: 10px 0 5px 0;">To approve this user for admin access, run the following SQL command:</p>
+            <div class="code-block">
+                UPDATE users SET is_admin = TRUE WHERE email = '{user_email}';
+            </div>
+        </div>
+    </div>
+    
+    <div class="footer">
+        <p style="margin: 0;">This email was automatically generated from a new user registration.</p>
+        <p style="margin: 10px 0 0 0;">Please review and approve the user to grant them access to the system.</p>
+    </div>
+</body>
+</html>
+"""
+            
+            # Send email
+            success = await self.send_email(
+                to_email=admin_email,
+                subject=subject,
+                html_body=html_body,
+                plain_body=plain_body
+            )
+            
+            if success:
+                logging.info(f"📧 Business details email sent to admin {admin_email} for user {user_email}")
+            else:
+                logging.error(f"❌ Failed to send business details email for user {user_email}")
+            
+            return success
+            
+        except Exception as e:
+            logging.error(f"❌ Error sending business details email: {e}")
+            return False

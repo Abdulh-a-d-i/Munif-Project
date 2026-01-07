@@ -239,6 +239,10 @@ class PGDB:
                     result = cursor.fetchone()
 
                     if result and bcrypt.checkpw(user_data['password'].encode('utf-8'), result[3].encode('utf-8')):
+                        # Verify admin status
+                        if not result[7]:  # result[7] is is_admin
+                            raise ValueError("Access denied. Admin privileges required.")
+                        
                         return {
                             "id": result[0],
                             "username": result[1],
@@ -261,6 +265,133 @@ class PGDB:
                     (user_id,)
                 )
                 return cursor.fetchone()
+
+    def get_all_users(self, page: int = 1, page_size: int = 20, search: str = None):
+        """
+        Get paginated list of all users with optional search.
+        Supports search by username or email.
+        Returns user info WITHOUT password_hash for security.
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    # Build WHERE clause for search
+                    where_clause = ""
+                    params = []
+                    
+                    if search:
+                        where_clause = "WHERE username ILIKE %s OR email ILIKE %s"
+                        search_pattern = f"%{search}%"
+                        params = [search_pattern, search_pattern]
+                    
+                    # Count total records
+                    count_query = f"SELECT COUNT(*) FROM users {where_clause}"
+                    cursor.execute(count_query, tuple(params))
+                    total = cursor.fetchone()["count"]
+                    
+                    # Calculate pagination
+                    offset = (page - 1) * page_size
+                    total_pages = (total + page_size - 1) // page_size
+                    
+                    # Get paginated users
+                    query = f"""
+                        SELECT id, username, email, first_name, last_name, is_admin, created_at
+                        FROM users
+                        {where_clause}
+                        ORDER BY created_at DESC
+                        LIMIT %s OFFSET %s
+                    """
+                    params.extend([page_size, offset])
+                    
+                    cursor.execute(query, tuple(params))
+                    users = cursor.fetchall()
+                    
+                    return {
+                        "users": users,
+                        "pagination": {
+                            "page": page,
+                            "page_size": page_size,
+                            "total": total,
+                            "total_pages": total_pages
+                        }
+                    }
+                    
+            except Exception as e:
+                logging.error(f"Error fetching all users: {e}")
+                raise
+
+    def update_user_admin_status(self, user_id: int, is_admin: bool, admin_id: int):
+        """
+        Update user's admin status.
+        Validates that admin_id has permission and prevents self-demotion.
+        
+        Args:
+            user_id: ID of user to update
+            is_admin: New admin status
+            admin_id: ID of admin making the change
+            
+        Returns:
+            Updated user dict
+            
+        Raises:
+            ValueError: If validation fails
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    # Verify admin_id is actually an admin
+                    cursor.execute(
+                        "SELECT is_admin FROM users WHERE id = %s",
+                        (admin_id,)
+                    )
+                    admin_user = cursor.fetchone()
+                    
+                    if not admin_user or not admin_user["is_admin"]:
+                        raise ValueError("Only admins can update user admin status")
+                    
+                    # Prevent self-demotion
+                    if user_id == admin_id and not is_admin:
+                        raise ValueError("Cannot remove your own admin status")
+                    
+                    # Check if user exists
+                    cursor.execute(
+                        "SELECT id, username, email FROM users WHERE id = %s",
+                        (user_id,)
+                    )
+                    target_user = cursor.fetchone()
+                    
+                    if not target_user:
+                        raise ValueError(f"User with ID {user_id} not found")
+                    
+                    # Update admin status
+                    cursor.execute(
+                        """
+                        UPDATE users 
+                        SET is_admin = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING id, username, email, is_admin, created_at
+                        """,
+                        (is_admin, user_id)
+                    )
+                    
+                    updated_user = cursor.fetchone()
+                    conn.commit()
+                    
+                    action = "promoted to" if is_admin else "demoted from"
+                    logging.info(
+                        f"✅ User {target_user['username']} (ID: {user_id}) "
+                        f"{action} admin by admin ID: {admin_id}"
+                    )
+                    
+                    return updated_user
+                    
+            except ValueError as ve:
+                conn.rollback()
+                raise ve
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error updating user admin status: {e}")
+                raise
 
     # ==================== USER AGENT STATUS ====================
     def create_user_agent_status_table(self):

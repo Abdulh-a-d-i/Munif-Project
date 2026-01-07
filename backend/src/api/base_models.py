@@ -173,3 +173,33 @@ class ToggleAgentStatusRequest(BaseModel):
                 "is_active": True
             }
         }
+
+
+class BusinessDetailsRequest(BaseModel):
+    """Request model for post-signup business details submission"""
+    agent_name: str = Field(..., min_length=1, max_length=100)
+    business_name: str = Field(..., min_length=1, max_length=100)
+    business_email: EmailStr
+    industry: str = Field(..., min_length=1, max_length=50)
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "agent_name": "Customer Support Agent",
+                "business_name": "Acme Corporation",
+                "business_email": "contact@acme.com",
+                "industry": "Healthcare"
+            }
+        }
+
+
+class UpdateAdminStatusRequest(BaseModel):
+    """Request model for updating user admin status"""
+    is_admin: bool = Field(...)
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "is_admin": True
+            }
+        }

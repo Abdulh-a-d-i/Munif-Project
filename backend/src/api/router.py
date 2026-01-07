@@ -35,13 +35,16 @@ from src.api.base_models import (
     ResetPasswordRequest,
     ForgotPasswordRequest,
     ContactFormRequest,
-    ToggleAgentStatusRequest
+    ToggleAgentStatusRequest,
+    BusinessDetailsRequest,
+    UpdateAdminStatusRequest
 )
 from src.utils.db import PGDB 
 from src.utils.mail_management import Send_Mail
 from src.utils.jwt_utils import create_access_token
 from src.utils.utils import (
     get_current_user, 
+    require_admin,
     add_call_event, 
     fetch_and_store_transcript, 
     fetch_and_store_recording, 
@@ -111,7 +114,7 @@ def register_user(user: UserRegister):
     user_dict = user.dict()
     user_dict["email"] = user_dict["email"].strip().lower()
     user_dict["username"] = user_dict["username"].strip().lower()
-    user_dict['is_admin'] = True
+    user_dict['is_admin'] = False
     try:
         db.register_user(user_dict)
         return JSONResponse(status_code=201, content={"message": "You are registered successfully."})
@@ -134,6 +137,10 @@ def login_user(user: UserLogin):
         if not result:
             return error_response("Invalid username or password", status_code=422)
         
+        # Check if user has admin privileges
+        if not result.get("is_admin", False):
+            return error_response("Access denied. Only admin users can login.", status_code=403)
+        
         token = create_access_token({"sub": str(result["id"])})
         return {
             "access_token": token,
@@ -145,6 +152,138 @@ def login_user(user: UserLogin):
     except Exception as e:
         logging.error(f"Error during login: {str(e)}")
         return error_response(f"Internal server error: {str(e)}", status_code=500)
+
+@router.post("/submit-business-details")
+async def submit_business_details(
+    details: BusinessDetailsRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Submit business details after signup.
+    Sends email to admin with user's business information for review.
+    User must be authenticated to submit details.
+    """
+    try:
+        # Get admin email from environment variable
+        admin_email = os.getenv("ADMIN_EMAIL")
+        if not admin_email:
+            logging.error("ADMIN_EMAIL not configured in environment variables")
+            return error_response("Admin email not configured", status_code=500)
+        
+        # Get user information
+        user_email = current_user.get("email")
+        user_name = current_user.get("username", "Unknown")
+        
+        # Send email to admin with business details
+        email_sent = await mail_obj.send_business_details_to_admin(
+            user_email=user_email,
+            user_name=user_name,
+            agent_name=details.agent_name,
+            business_name=details.business_name,
+            business_email=details.business_email,
+            industry=details.industry,
+            admin_email=admin_email
+        )
+        
+        if not email_sent:
+            logging.error(f"Failed to send business details email for user {user_email}")
+            return error_response("Failed to send business details. Please try again.", status_code=500)
+        
+        logging.info(f"✅ Business details submitted successfully for user {user_email}")
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "message": "Business details submitted successfully. Admin will review your request."
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f"Error submitting business details: {str(e)}")
+        traceback.print_exc()
+        return error_response(f"Failed to submit business details: {str(e)}", status_code=500)
+
+# ==================== ADMIN USER MANAGEMENT ====================
+@router.get("/admin/users")
+async def get_all_users_admin(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: str = Query(None),
+    current_user: dict = Depends(require_admin)
+):
+    """
+    Get paginated list of all users (admin only).
+    Supports search by username or email.
+    
+    Requires: Admin authentication
+    """
+    try:
+        result = db.get_all_users(page=page, page_size=page_size, search=search)
+        
+        # Format created_at timestamps
+        for user in result.get("users", []):
+            if user.get("created_at"):
+                user["created_at"] = user["created_at"].isoformat() if hasattr(user["created_at"], 'isoformat') else str(user["created_at"])
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "data": result
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f"Error fetching users: {str(e)}")
+        traceback.print_exc()
+        return error_response(f"Failed to fetch users: {str(e)}", status_code=500)
+
+
+@router.patch("/admin/users/{user_id}/admin-status")
+async def update_user_admin_status_endpoint(
+    user_id: int,
+    request: UpdateAdminStatusRequest,
+    current_user: dict = Depends(require_admin)
+):
+    """
+    Promote or demote user to admin status (admin only).
+    Cannot remove own admin status.
+    
+    Requires: Admin authentication
+    """
+    try:
+        admin_id = current_user.get("id")
+        
+        # Update user admin status
+        updated_user = db.update_user_admin_status(
+            user_id=user_id,
+            is_admin=request.is_admin,
+            admin_id=admin_id
+        )
+        
+        # Format created_at
+        if updated_user.get("created_at"):
+            updated_user["created_at"] = updated_user["created_at"].isoformat() if hasattr(updated_user["created_at"], 'isoformat') else str(updated_user["created_at"])
+        
+        action = "promoted to admin" if request.is_admin else "demoted from admin"
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "message": f"User {action} successfully",
+                "user": updated_user
+            }
+        )
+        
+    except ValueError as ve:
+        # Validation errors (self-demotion, user not found, etc.)
+        return error_response(str(ve), status_code=400)
+    except Exception as e:
+        logging.error(f"Error updating user admin status: {str(e)}")
+        traceback.print_exc()
+        return error_response(f"Failed to update admin status: {str(e)}", status_code=500)
 
 # ==================== USER PLAN USAGE ====================
 @router.get("/user/plan-usage")

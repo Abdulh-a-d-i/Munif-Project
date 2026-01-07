@@ -176,26 +176,18 @@ def error_response(message: str, status_code: int = 400):
 
 
 
-def is_admin(current_user=Depends(get_current_user)):
+def require_admin(current_user: dict = Depends(get_current_user)):
     """
-    Check if the current user is an admin.
-    If not, return a 403 Forbidden response.
+    Dependency to ensure user is admin.
+    Raises 403 if user is not admin.
+    Use this as a dependency for admin-only endpoints.
     """
-    # # Assuming current_user[5] is the admin flag (True/False)
-    print(current_user)
-    try:
-        if current_user[5] == False:
-            raise HTTPException(
-                status_code=403,
-                detail="You do not have permission to perform this action."
-            )
-    except Exception as e:
-        logging.error(f"Error checking admin status for user : {e}")
+    if not current_user.get("is_admin", False):
+        logging.warning(f"Non-admin user {current_user.get('id')} attempted to access admin endpoint")
         raise HTTPException(
-            status_code=500,
-            detail=f"{e}"
+            status_code=403,
+            detail="Admin access required"
         )
-
     return current_user
 
 def add_call_event(call_id: str, event_type: str, event_data: dict = None):
