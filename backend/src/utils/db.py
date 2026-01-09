@@ -29,6 +29,11 @@ class PGDB:
             
         self.connection_string = os.getenv('DATABASE_URL')
         
+        # Add SSL mode if not present (for cloud databases like Supabase)
+        if self.connection_string and "sslmode" not in self.connection_string:
+            separator = "&" if "?" in self.connection_string else "?"
+            self.connection_string += f"{separator}sslmode=require"
+        
         # Create pool ONCE
         PGDB._pool = pool.SimpleConnectionPool(
             10, 100, self.connection_string
@@ -101,6 +106,35 @@ class PGDB:
                 logging.info("✅ agents table created with avatar_url")
             except Exception as e:
                 logging.error(f"Error creating agents table: {e}")
+
+    def add_agent_fields_if_not_exists(self):
+        """
+        Add new fields to agents table if they don't exist.
+        Handles schema migrations for existing databases.
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    # Add user_id column (nullable, references users)
+                    cursor.execute("""
+                        DO $$ 
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name='agents' AND column_name='user_id'
+                            ) THEN
+                                ALTER TABLE agents 
+                                ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+                                
+                                CREATE INDEX idx_agents_user ON agents(user_id);
+                            END IF;
+                        END $$;
+                    """)
+                conn.commit()
+                logging.info("✅ Agent fields migration completed")
+            except Exception as e:
+                logging.error(f"Error adding agent fields: {e}")
+
 
     def get_agent_by_phone(self, phone_number: str):
         """
@@ -234,15 +268,19 @@ class PGDB:
                         FROM users
                         WHERE username = %s OR email = %s
                         LIMIT 1
-                    """, (user_data.get("username"), user_data['email']))
+                    """, (user_data['email'], user_data['email']))
 
                     result = cursor.fetchone()
 
-                    if result and bcrypt.checkpw(user_data['password'].encode('utf-8'), result[3].encode('utf-8')):
-                        # Verify admin status
-                        if not result[7]:  # result[7] is is_admin
-                            raise ValueError("Access denied. Admin privileges required.")
-                        
+                    if not result:
+                        logging.error(f"❌ No user found with email: {user_data['email']}")
+                        raise ValueError("Invalid username or password.")
+                    
+                    logging.info(f"✅ User found: {result[1]} ({result[2]})")
+                    logging.info(f"🔐 Checking password...")
+                    
+                    if bcrypt.checkpw(user_data['password'].encode('utf-8'), result[3].encode('utf-8')):
+                        logging.info(f"✅ Password correct for user: {result[2]}")
                         return {
                             "id": result[0],
                             "username": result[1],
@@ -251,6 +289,7 @@ class PGDB:
                             "is_admin": result[7]
                         }
                     else:
+                        logging.error(f"❌ Password incorrect for user: {result[2]}")
                         raise ValueError("Invalid username or password.")
             except Exception as e:
                 logging.error(f"Error during login: {str(e)}")
@@ -319,6 +358,21 @@ class PGDB:
             except Exception as e:
                 logging.error(f"Error fetching all users: {e}")
                 raise
+
+    def get_all_users_simple(self):
+        """
+        Get simplified list of all users for dropdowns.
+        Returns only id, username, and email.
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT id, username, email, is_admin
+                    FROM users
+                    ORDER BY username ASC
+                """)
+                return cursor.fetchall()
+
 
     def update_user_admin_status(self, user_id: int, is_admin: bool, admin_id: int):
         """
@@ -1370,9 +1424,9 @@ class PGDB:
                             owner_name, owner_email, avatar_url,
                             business_hours_start, business_hours_end,
                             allowed_minutes, used_minutes,
-                            admin_id
+                            admin_id, user_id
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING *;
                     """, (
                         agent_data["phone_number"],
@@ -1388,7 +1442,8 @@ class PGDB:
                         agent_data.get("business_hours_end"),    # NEW
                         agent_data.get("allowed_minutes", 0),    # NEW
                         0,  # used_minutes starts at 0           # NEW
-                        agent_data["admin_id"]
+                        agent_data["admin_id"],
+                        agent_data.get("user_id")  # NEW: user assignment
                     ))
                     result = cursor.fetchone()
                 conn.commit()
@@ -1429,7 +1484,7 @@ class PGDB:
                     'language', 'industry', 'phone_number', 
                     'owner_name', 'owner_email', 'avatar_url',
                     'business_hours_start', 'business_hours_end', 
-                    'allowed_minutes'  # Can update limit, but NOT used_minutes directly
+                    'allowed_minutes', 'user_id'  # Can update user assignment
                 }
                 
                 for key, value in updates.items():

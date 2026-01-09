@@ -523,6 +523,7 @@ END:VCALENDAR
         business_name: str,
         business_email: str,
         industry: str,
+        language: str,
         admin_email: str
     ):
         """
@@ -551,6 +552,7 @@ Agent Name: {agent_name}
 Business Name: {business_name}
 Business Email: {business_email}
 Industry: {industry}
+Language: {language}
 
 ─────────────────
 This user has completed registration and submitted their business details.
@@ -682,6 +684,10 @@ UPDATE users SET is_admin = TRUE WHERE email = '{user_email}';
             <div class="info-row">
                 <span class="info-label">Industry:</span>
                 <span class="info-value">{industry}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Language:</span>
+                <span class="info-value">{language}</span>
             </div>
         </div>
         

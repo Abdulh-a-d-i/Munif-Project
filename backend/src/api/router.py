@@ -127,20 +127,23 @@ def register_user(user: UserRegister):
 @router.post("/login", response_model=LoginResponse)
 def login_user(user: UserLogin):
     try:
+        logging.info(f"📥 Login request received")
+        logging.info(f"📧 Email: {user.email}")
+        logging.info(f"🔑 Password length: {len(user.password) if user.password else 0}")
+        
         user_dict = {
             "email": user.email,
             "password": user.password
         }
-        logging.info(f"User dict: {user_dict}")
+        logging.info(f"📦 User dict created: {user_dict}")
         user_dict["email"] = user_dict["email"].strip().lower()
+        
         result = db.login_user(user_dict)
         if not result:
+            logging.warning(f"❌ Login failed for {user_dict['email']}")
             return error_response("Invalid username or password", status_code=422)
         
-        # Check if user has admin privileges
-        if not result.get("is_admin", False):
-            return error_response("Access denied. Only admin users can login.", status_code=403)
-        
+        logging.info(f"✅ Login successful for {user_dict['email']}")
         token = create_access_token({"sub": str(result["id"])})
         return {
             "access_token": token,
@@ -148,9 +151,11 @@ def login_user(user: UserLogin):
             "user": result
         }
     except ValueError as ve:
+        logging.error(f"❌ ValueError during login: {str(ve)}")
         return error_response(str(ve), status_code=422)
     except Exception as e:
-        logging.error(f"Error during login: {str(e)}")
+        logging.error(f"❌ Error during login: {str(e)}")
+        traceback.print_exc()
         return error_response(f"Internal server error: {str(e)}", status_code=500)
 
 @router.post("/submit-business-details")
@@ -182,6 +187,7 @@ async def submit_business_details(
             business_name=details.business_name,
             business_email=details.business_email,
             industry=details.industry,
+            language=details.language,
             admin_email=admin_email
         )
         
@@ -238,6 +244,31 @@ async def get_all_users_admin(
         logging.error(f"Error fetching users: {str(e)}")
         traceback.print_exc()
         return error_response(f"Failed to fetch users: {str(e)}", status_code=500)
+
+
+@router.get("/users/list")
+async def get_users_list(current_user: dict = Depends(require_admin)):
+    """
+    Get simplified list of all users for dropdowns (admin only).
+    Returns only id, username, and email for each user.
+    
+    Requires: Admin authentication
+    """
+    try:
+        users = db.get_all_users_simple()
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "users": users
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f"Error fetching users list: {str(e)}")
+        traceback.print_exc()
+        return error_response(f"Failed to fetch users list: {str(e)}", status_code=500)
 
 
 @router.patch("/admin/users/{user_id}/admin-status")
@@ -1004,6 +1035,7 @@ async def create_agent(
     business_hours_start: str = Form(None),  # NEW (format: "09:00")
     business_hours_end: str = Form(None),    # NEW (format: "17:00")
     allowed_minutes: int = Form(0),          # NEW
+    user_id: int = Form(None),               # NEW: Assign to user
     avatar: UploadFile = File(None),
     current_user: dict = Depends(get_current_user)
 ):
@@ -1034,6 +1066,12 @@ async def create_agent(
                 return error_response("Invalid business_hours_start format. Use HH:MM", 400)
             if not re.match(time_pattern, business_hours_end):
                 return error_response("Invalid business_hours_end format. Use HH:MM", 400)
+        
+        # Validate user_id if provided
+        if user_id:
+            user = db.get_user_by_id(user_id)
+            if not user:
+                return error_response(f"User with ID {user_id} not found", 404)
         
         # Validate allowed_minutes
         if allowed_minutes < 0:
@@ -1076,7 +1114,8 @@ async def create_agent(
             "business_hours_start": business_hours_start,  # NEW
             "business_hours_end": business_hours_end,      # NEW
             "allowed_minutes": allowed_minutes,            # NEW
-            "admin_id": user_id
+            "user_id": user_id,                            # NEW: User assignment
+            "admin_id": current_user["id"]
         }
         
         # Save to database
@@ -1120,6 +1159,7 @@ async def update_agent(
     business_hours_start: str = Form(None),  # NEW
     business_hours_end: str = Form(None),    # NEW
     allowed_minutes: int = Form(None),       # NEW
+    user_id: int = Form(None),               # NEW: Update user assignment
     avatar: UploadFile = File(None),
     current_user: dict = Depends(get_current_user)
 ):
@@ -1162,6 +1202,12 @@ async def update_agent(
             if allowed_minutes < 0:
                 return error_response("allowed_minutes cannot be negative", 400)
             updates["allowed_minutes"] = allowed_minutes
+        if user_id is not None:  # NEW: Update user assignment
+            # Validate user exists
+            user = db.get_user_by_id(user_id)
+            if not user:
+                return error_response(f"User with ID {user_id} not found", 404)
+            updates["user_id"] = user_id
         
         
         if "business_hours_start" in updates:

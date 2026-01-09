@@ -86,6 +86,7 @@ class CreateAgentRequest(BaseModel):
     business_hours_start: Optional[str] = Field(default=None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
     business_hours_end: Optional[str] = Field(default=None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
     allowed_minutes: Optional[int] = Field(default=0, ge=0)  # NEW
+    user_id: Optional[int] = Field(default=None, gt=0)  # NEW: Assign agent to user
     
     class Config:
         json_schema_extra = {
@@ -118,6 +119,7 @@ class UpdateAgentRequest(BaseModel):
     business_hours_start: Optional[str] = Field(None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
     business_hours_end: Optional[str] = Field(None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
     allowed_minutes: Optional[int] = Field(None, ge=0)  # NEW
+    user_id: Optional[int] = Field(None, gt=0)  # NEW: Update user assignment
     
     class Config:
         json_schema_extra = {
@@ -181,6 +183,7 @@ class BusinessDetailsRequest(BaseModel):
     business_name: str = Field(..., min_length=1, max_length=100)
     business_email: EmailStr
     industry: str = Field(..., min_length=1, max_length=50)
+    language: str = Field(..., min_length=1, max_length=50)
     
     class Config:
         json_schema_extra = {
@@ -188,7 +191,8 @@ class BusinessDetailsRequest(BaseModel):
                 "agent_name": "Customer Support Agent",
                 "business_name": "Acme Corporation",
                 "business_email": "contact@acme.com",
-                "industry": "Healthcare"
+                "industry": "Healthcare",
+                "language": "English"
             }
         }
 
