@@ -269,13 +269,13 @@ END:VCALENDAR
             plain_body = (
                 f"Dear {owner_name},\n\n"
                 f"A new appointment has been booked by your AI agent.\n\n"
-                f"📅 Date: {appointment_date}\n"
-                f"🕐 Time: {start_time} - {end_time}\n\n"
-                f"👤 Customer Details:\n"
+                f" Date: {appointment_date}\n"
+                f" Time: {start_time} - {end_time}\n\n"
+                f" Customer Details:\n"
                 f"   Name: {customer_name}\n"
                 f"   Email: {customer_email}\n"
                 f"   Phone: {customer_phone or 'N/A'}\n\n"
-                f"📝 Notes: {description or 'None'}\n\n"
+                f" Notes: {description or 'None'}\n\n"
                 f"This appointment has been added to your calendar.\n\n"
                 f"Best regards,\nYour AI Assistant"
             )
@@ -283,21 +283,21 @@ END:VCALENDAR
             html_body = f"""
             <html>
                 <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                    <h2 style="color: #2563eb;">New Appointment Booked 🎉</h2>
+                    <h2 style="color: #2563eb;">New Appointment Booked </h2>
                     <p>Dear {owner_name},</p>
                     <p>A new appointment has been booked by your AI agent.</p>
                     
                     <div style="background-color: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0;">
                         <h3 style="margin-top: 0; color: #1f2937;">Appointment Details</h3>
-                        <p><strong>📅 Date:</strong> {appointment_date}</p>
-                        <p><strong>🕐 Time:</strong> {start_time} - {end_time}</p>
+                        <p><strong> Date:</strong> {appointment_date}</p>
+                        <p><strong> Time:</strong> {start_time} - {end_time}</p>
                         
                         <h3 style="color: #1f2937; margin-top: 20px;">Customer Information</h3>
-                        <p><strong>👤 Name:</strong> {customer_name}</p>
-                        <p><strong>📧 Email:</strong> {customer_email}</p>
-                        <p><strong>📱 Phone:</strong> {customer_phone or 'N/A'}</p>
+                        <p><strong> Name:</strong> {customer_name}</p>
+                        <p><strong> Email:</strong> {customer_email}</p>
+                        <p><strong> Phone:</strong> {customer_phone or 'N/A'}</p>
                         
-                        {f'<p><strong>📝 Notes:</strong> {description}</p>' if description else ''}
+                        {f'<p><strong> Notes:</strong> {description}</p>' if description else ''}
                     </div>
                     
                     <p style="color: #6b7280; font-size: 14px;">
@@ -331,11 +331,11 @@ END:VCALENDAR
             finally:
                 server.quit()
 
-            logging.info(f"📧 Owner notification sent to {owner_email}")
+            logging.info(f" Owner notification sent to {owner_email}")
             return True
             
         except Exception as e:
-            logging.error(f"❌ Error sending owner notification: {e}")
+            logging.error(f" Error sending owner notification: {e}")
             return False
 
 
@@ -353,7 +353,7 @@ END:VCALENDAR
         """
         try:
             full_name = f"{first_name} {last_name}".strip()
-            subject = f"📬 Contact Form Submission - {full_name}"
+            subject = f" Contact Form Submission - {full_name}"
             
             # Build plain text version
             plain_body = f"""
@@ -458,13 +458,13 @@ END:VCALENDAR
     </head>
     <body>
         <div class="header">
-            <h1 style="margin: 0;">📬 New Contact Form Submission</h1>
+            <h1 style="margin: 0;"> New Contact Form Submission</h1>
             <p style="margin: 10px 0 0 0; opacity: 0.9;">Someone reached out through your website</p>
         </div>
         
         <div class="content">
             <div class="section">
-                <div class="section-title">👤 Customer Information</div>
+                <div class="section-title"> Customer Information</div>
                 <div class="info-row">
                     <span class="info-label">Name:</span>
                     <span class="info-value">{full_name}</span>
@@ -476,7 +476,7 @@ END:VCALENDAR
             </div>
             
             <div class="section">
-                <div class="section-title">💬 Message</div>
+                <div class="section-title"> Message</div>
                 <div class="message-box">
                     {customer_message or '<em>No message provided</em>'}
                 </div>
@@ -504,14 +504,14 @@ END:VCALENDAR
             )
             
             if success:
-                logging.info(f"📧 Contact form email sent to {recipient_email} from {customer_email}")
+                logging.info(f" Contact form email sent to {recipient_email} from {customer_email}")
             else:
-                logging.error(f"❌ Failed to send contact form email from {customer_email}")
+                logging.error(f" Failed to send contact form email from {customer_email}")
             
             return success
             
         except Exception as e:
-            logging.error(f"❌ Error sending contact form email: {e}")
+            logging.error(f" Error sending contact form email: {e}")
             return False
 
 
@@ -522,6 +522,7 @@ END:VCALENDAR
         agent_name: str,
         business_name: str,
         business_email: str,
+        phone_number: str,
         industry: str,
         language: str,
         admin_email: str
@@ -534,7 +535,7 @@ END:VCALENDAR
             from datetime import datetime
             submission_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            subject = f"🚀 New User Business Details - {business_name}"
+            subject = f" New User Business Details - {business_name}"
             
             # Build plain text version
             plain_body = f"""
@@ -551,6 +552,7 @@ Business Details:
 Agent Name: {agent_name}
 Business Name: {business_name}
 Business Email: {business_email}
+Phone Number: {phone_number}
 Industry: {industry}
 Language: {language}
 
@@ -646,13 +648,13 @@ UPDATE users SET is_admin = TRUE WHERE email = '{user_email}';
 </head>
 <body>
     <div class="header">
-        <h1 style="margin: 0;">🚀 New User Registration</h1>
+        <h1 style="margin: 0;"> New User Registration</h1>
         <p style="margin: 10px 0 0 0; opacity: 0.9;">Business Details Submission</p>
     </div>
     
     <div class="content">
         <div class="section">
-            <div class="section-title">👤 User Information</div>
+            <div class="section-title"> User Information</div>
             <div class="info-row">
                 <span class="info-label">Registration Email:</span>
                 <span class="info-value"><a href="mailto:{user_email}" style="color: #667eea; text-decoration: none;">{user_email}</a></span>
@@ -668,7 +670,7 @@ UPDATE users SET is_admin = TRUE WHERE email = '{user_email}';
         </div>
         
         <div class="section">
-            <div class="section-title">🏢 Business Details</div>
+            <div class="section-title"> Business Details</div>
             <div class="info-row">
                 <span class="info-label">Agent Name:</span>
                 <span class="info-value"><strong>{agent_name}</strong></span>
@@ -682,6 +684,10 @@ UPDATE users SET is_admin = TRUE WHERE email = '{user_email}';
                 <span class="info-value"><a href="mailto:{business_email}" style="color: #667eea; text-decoration: none;">{business_email}</a></span>
             </div>
             <div class="info-row">
+                <span class="info-label">Phone Number:</span>
+                <span class="info-value">{phone_number}</span>
+            </div>
+            <div class="info-row">
                 <span class="info-label">Industry:</span>
                 <span class="info-value">{industry}</span>
             </div>
@@ -692,7 +698,7 @@ UPDATE users SET is_admin = TRUE WHERE email = '{user_email}';
         </div>
         
         <div class="action-box">
-            <strong>⚡ Action Required:</strong>
+            <strong> Action Required:</strong>
             <p style="margin: 10px 0 5px 0;">To approve this user for admin access, run the following SQL command:</p>
             <div class="code-block">
                 UPDATE users SET is_admin = TRUE WHERE email = '{user_email}';
@@ -717,12 +723,237 @@ UPDATE users SET is_admin = TRUE WHERE email = '{user_email}';
             )
             
             if success:
-                logging.info(f"📧 Business details email sent to admin {admin_email} for user {user_email}")
+                logging.info(f" Business details email sent to admin {admin_email} for user {user_email}")
             else:
-                logging.error(f"❌ Failed to send business details email for user {user_email}")
+                logging.error(f" Failed to send business details email for user {user_email}")
             
             return success
             
         except Exception as e:
-            logging.error(f"❌ Error sending business details email: {e}")
+            logging.error(f" Error sending business details email: {e}")
+            return False
+
+
+    async def send_agent_created_email(
+        self,
+        owner_email: str,
+        owner_name: str,
+        agent_name: str,
+        phone_number: str,
+        voice_type: str = None,
+        language: str = None,
+        industry: str = None
+    ):
+        """
+        Send agent creation confirmation email to business owner.
+        Notifies that their AI agent has been created and is ready to use.
+        """
+        try:
+            from datetime import datetime
+            creation_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            subject = f" Your AI Agent '{agent_name}' is Ready!"
+            
+            # Build plain text version
+            plain_body = f"""
+Your AI Agent Has Been Created!
+
+Dear {owner_name or 'Valued Customer'},
+
+Great news! Your AI agent has been successfully created and is ready to start handling calls for your business.
+
+Agent Details:
+─────────────────
+Agent Name: {agent_name}
+Phone Number: {phone_number}
+{f'Voice Type: {voice_type}' if voice_type else ''}
+{f'Language: {language}' if language else ''}
+{f'Industry: {industry}' if industry else ''}
+Created: {creation_time}
+
+Your AI agent is now active and ready to:
+• Answer incoming calls 24/7
+• Schedule appointments automatically
+• Provide information to your customers
+• Route calls intelligently
+
+─────────────────
+To manage your agent, log in to your dashboard at any time.
+
+If you have any questions or need assistance, please don't hesitate to reach out to our support team.
+
+Best regards,
+MrBot-KI Team
+"""
+            
+            html_body = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            padding: 40px 30px;
+            text-align: center;
+            border-radius: 8px 8px 0 0;
+        }}
+        .content {{
+            background: #f9fafb;
+            padding: 30px;
+            border: 1px solid #e5e7eb;
+        }}
+        .section {{
+            background: white;
+            padding: 25px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            border-left: 4px solid #10b981;
+        }}
+        .section-title {{
+            color: #10b981;
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+        }}
+        .info-row {{
+            display: flex;
+            padding: 10px 0;
+            border-bottom: 1px solid #f3f4f6;
+        }}
+        .info-row:last-child {{
+            border-bottom: none;
+        }}
+        .info-label {{
+            font-weight: bold;
+            color: #6b7280;
+            min-width: 140px;
+        }}
+        .info-value {{
+            color: #1f2937;
+            flex: 1;
+        }}
+        .features-list {{
+            background: #f0fdf4;
+            padding: 20px;
+            border-radius: 6px;
+            border: 1px solid #bbf7d0;
+        }}
+        .features-list li {{
+            padding: 8px 0;
+            color: #15803d;
+        }}
+        .footer {{
+            background: #1f2937;
+            color: #9ca3af;
+            padding: 25px;
+            text-align: center;
+            font-size: 14px;
+            border-radius: 0 0 8px 8px;
+        }}
+        .button {{
+            display: inline-block;
+            background: #10b981;
+            color: white;
+            padding: 14px 35px;
+            text-decoration: none;
+            border-radius: 6px;
+            margin-top: 20px;
+            font-weight: bold;
+            font-size: 16px;
+        }}
+        .emoji {{
+            font-size: 24px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="emoji"></div>
+        <h1 style="margin: 15px 0 0 0; font-size: 28px;">Your AI Agent is Ready!</h1>
+        <p style="margin: 10px 0 0 0; opacity: 0.95; font-size: 16px;">Successfully created and activated</p>
+    </div>
+    
+    <div class="content">
+        <p style="font-size: 16px; color: #1f2937; margin-top: 0;">
+            Dear {owner_name or 'Valued Customer'},
+        </p>
+        <p style="font-size: 15px; color: #374151;">
+            Great news! Your AI agent has been successfully created and is ready to start handling calls for your business. 
+        </p>
+        
+        <div class="section">
+            <div class="section-title"> Agent Details</div>
+            <div class="info-row">
+                <span class="info-label">Agent Name:</span>
+                <span class="info-value"><strong>{agent_name}</strong></span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Phone Number:</span>
+                <span class="info-value"><strong>{phone_number}</strong></span>
+            </div>
+            {f'<div class="info-row"><span class="info-label">Voice Type:</span><span class="info-value">{voice_type.capitalize()}</span></div>' if voice_type else ''}
+            {f'<div class="info-row"><span class="info-label">Language:</span><span class="info-value">{language.upper()}</span></div>' if language else ''}
+            {f'<div class="info-row"><span class="info-label">Industry:</span><span class="info-value">{industry}</span></div>' if industry else ''}
+            <div class="info-row">
+                <span class="info-label">Created:</span>
+                <span class="info-value">{creation_time}</span>
+            </div>
+        </div>
+        
+        <div class="section">
+            <div class="section-title"> What Your Agent Can Do</div>
+            <div class="features-list">
+                <ul style="margin: 0; padding-left: 20px;">
+                    <li><strong>Answer calls 24/7</strong> - Never miss a customer call again</li>
+                    <li><strong>Schedule appointments</strong> - Automatically book appointments</li>
+                    <li><strong>Provide information</strong> - Answer customer questions instantly</li>
+                    <li><strong>Intelligent routing</strong> - Direct calls to the right place</li>
+                </ul>
+            </div>
+        </div>
+        
+        <div style="text-align: center; padding: 20px 0;">
+            <p style="color: #6b7280; margin-bottom: 10px;">Ready to manage your agent?</p>
+            <a href="https://www.mrbot-ki.de/dashboard" class="button">Go to Dashboard</a>
+        </div>
+    </div>
+    
+    <div class="footer">
+        <p style="margin: 0; font-size: 15px;">
+            <strong>Need help?</strong> Our support team is here for you.
+        </p>
+        <p style="margin: 15px 0 0 0; color: #9ca3af;">
+            This email was automatically generated by MrBot-KI
+        </p>
+    </div>
+</body>
+</html>
+"""
+            
+            # Send email
+            success = await self.send_email(
+                to_email=owner_email,
+                subject=subject,
+                html_body=html_body,
+                plain_body=plain_body
+            )
+            
+            if success:
+                logging.info(f" Agent creation email sent to {owner_email} for agent '{agent_name}'")
+            else:
+                logging.error(f" Failed to send agent creation email to {owner_email}")
+            
+            return success
+            
+        except Exception as e:
+            logging.error(f" Error sending agent creation email: {e}")
             return False

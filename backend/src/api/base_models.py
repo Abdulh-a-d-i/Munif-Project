@@ -21,12 +21,14 @@ class UserOut(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     created_at: datetime
-    is_admin: bool = False #*
+    is_admin: bool = False
+    role: Literal['admin', 'user'] = 'user'  
 
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str
     user: UserOut
+    onboard: bool  
 
 class UpdateUserProfileRequest(BaseModel):
     # user_id: int
@@ -78,7 +80,7 @@ class CreateAgentRequest(BaseModel):
     agent_name: str = Field(..., min_length=1, max_length=100)
     phone_number: str = Field(..., min_length=10, max_length=20)
     system_prompt: str = Field(..., min_length=10)
-    voice_type: str = Field(..., pattern="^(male|female)$")
+    voice_type: Optional[str] = Field(None, pattern="^(male|female)$")  # Optional - defaults to None
     language: Optional[str] = Field(default="en", max_length=10)
     industry: Optional[str] = Field(default=None, max_length=50)
     owner_name: Optional[str] = Field(default=None, max_length=100)
@@ -164,37 +166,46 @@ class ContactFormRequest(BaseModel):
 
 
 class ToggleAgentStatusRequest(BaseModel):
-    """Request model for toggling agent active/inactive status for a user"""
+    """
+    Request model for toggling agent status.
+    user_id is optional - if provided by Admin, acts on behalf of that user.
+    """
     agent_id: int = Field(..., gt=0)
     is_active: bool = Field(...)
+    user_id: Optional[int] = Field(None, gt=0)  # NEW: Allow admin to toggle for specific user
     
     class Config:
         json_schema_extra = {
             "example": {
                 "agent_id": 5,
-                "is_active": True
+                "is_active": True,
+                "user_id": 12  # Optional: For admin use
             }
         }
 
 
 class BusinessDetailsRequest(BaseModel):
     """Request model for post-signup business details submission"""
-    agent_name: str = Field(..., min_length=1, max_length=100)
-    business_name: str = Field(..., min_length=1, max_length=100)
-    business_email: EmailStr
-    industry: str = Field(..., min_length=1, max_length=50)
-    language: str = Field(..., min_length=1, max_length=50)
+    agent_name: str = Field(None, min_length=1, max_length=100)
+    business_name: str = Field(None, min_length=1, max_length=100)
+    business_email: str = Field(None, min_length=1)
+    phone_number: str = Field(None, min_length=10, max_length=20)  
+    industry: str = Field(None, min_length=1, max_length=50)
+    language: str = Field(None, min_length=1, max_length=50)
     
     class Config:
         json_schema_extra = {
             "example": {
-                "agent_name": "Customer Support Agent",
-                "business_name": "Acme Corporation",
-                "business_email": "contact@acme.com",
-                "industry": "Healthcare",
-                "language": "English"
+                "agent_name": "String",
+                "business_name": "String",
+                "business_email": "String",
+                "phone_number": "String",
+                "industry": "String",
+                "language": "String"
             }
         }
+
+
 
 
 class UpdateAdminStatusRequest(BaseModel):

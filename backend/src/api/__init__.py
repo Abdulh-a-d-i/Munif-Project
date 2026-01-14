@@ -1,4 +1,5 @@
-from .router import router
+from .router import router as admin_router
+from .user_router import router as user_router
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from urllib.request import Request
@@ -28,7 +29,9 @@ def create_app():
         allow_headers=["*"],  # Allows all headers
     )
 
-    app.include_router(router, tags=["Auth"], prefix="/api")
+    # Include routers
+    app.include_router(admin_router, tags=["Admin"], prefix="/api")
+    app.include_router(user_router, tags=["User"], prefix="/api")
 
     # Route Handlers
     @app.get("/health")

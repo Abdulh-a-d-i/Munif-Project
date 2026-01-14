@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+import time
 import bcrypt
 import urllib.parse
 import json
@@ -29,45 +30,117 @@ class PGDB:
             
         self.connection_string = os.getenv('DATABASE_URL')
         
-        # Add SSL mode if not present (for cloud databases like Supabase)
-        if self.connection_string and "sslmode" not in self.connection_string:
-            separator = "&" if "?" in self.connection_string else "?"
-            self.connection_string += f"{separator}sslmode=require"
+        # Parse connection string to add keepalive parameters
+        if self.connection_string:
+            # Add SSL mode if not present (for cloud databases like Supabase)
+            if "sslmode" not in self.connection_string:
+                separator = "&" if "?" in self.connection_string else "?"
+                self.connection_string += f"{separator}sslmode=require"
+            
+            # Add keepalive parameters to prevent connection timeout
+            if "keepalives" not in self.connection_string:
+                self.connection_string += "&keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=5"
         
-        # Create pool ONCE
+        # Create pool ONCE with connection validation
         PGDB._pool = pool.SimpleConnectionPool(
-            10, 100, self.connection_string
+            minconn=10,
+            maxconn=100,
+            dsn=self.connection_string
         )
         
         # Create tables ONCE
         self.create_users_table()
         self.create_agents_table()
         self.create_call_history_table()
-        self.create_voice_samples_table()
-        self.create_subscriptions_table()
         self.create_appointments_table()
         self.create_user_agent_status_table()
-        self.add_agent_fields_if_not_exists()
+        self.ensure_agent_schema_migration()
+        self.ensure_user_schema_migration()
 
     def get_connection(self):
         """Get connection from pool"""
         return PGDB._pool.getconn()
     
-    def release_connection(self, conn):
-        """Return connection to pool"""
-        PGDB._pool.putconn(conn)
+    def release_connection(self, conn, close=False):
+        """
+        Return connection to pool.
+        Args:
+            conn: The connection object
+            close: If True, close the connection (remove from pool). Use for broken connections.
+        """
+        if PGDB._pool:
+            PGDB._pool.putconn(conn, close=close)
 
     @contextmanager
     def get_connection_context(self):
         """
         Safe connection context manager that ALWAYS releases connection.
         Use this in ALL database operations!
+        Includes retry logic to handle stale connections in the pool.
         """
-        conn = self.get_connection()
+        conn = None
+        max_retries = 5
+        
         try:
+            # Retry loop to get a valid connection
+            for attempt in range(max_retries):
+                try:
+                    conn = self.get_connection()
+                    
+                    # Validate connection is alive
+                    if conn.closed:
+                        raise Exception("Connection is closed")
+                        
+                    with conn.cursor() as test_cursor:
+                        test_cursor.execute("SELECT 1")
+                        
+                    # If we get here, connection is good
+                    break
+                    
+                except Exception as e:
+                    logging.warning(f" Connection validation failed (Attempt {attempt+1}/{max_retries}): {e}")
+                    
+                    if conn:
+                        # Remove bad connection from pool
+                        self.release_connection(conn, close=True)
+                        conn = None
+                    
+                    # Exponential backoff: 0.2s, 0.4s, 0.8s, 1.6s, 3.2s
+                    sleep_time = 0.2 * (2 ** attempt)
+                    logging.info(f" Sleeping {sleep_time:.2f}s before retry...")
+                    time.sleep(sleep_time)
+
+            # If all retries failed, force pool reset
+            if conn is None:
+                logging.critical(" CONNECTION POOL EXHAUSTED/BROKEN. RESETTING POOL.")
+                try:
+                    if PGDB._pool:
+                        PGDB._pool.closeall()
+                except Exception as pool_e:
+                    logging.error(f"Error checking closing pool: {pool_e}")
+                
+                # Re-create pool
+                PGDB._pool = pool.SimpleConnectionPool(
+                    minconn=10,
+                    maxconn=100,
+                    dsn=self.connection_string
+                )
+                logging.info(" Connection pool re-initialized. Trying one last time...")
+                
+                # Last ditch attempt
+                conn = self.get_connection()
+                with conn.cursor() as test_cursor:
+                    test_cursor.execute("SELECT 1")
+            
             yield conn
+            
+        except Exception as e:
+            logging.error(f"Error in connection context: {e}")
+            raise
         finally:
-            self.release_connection(conn)
+            if conn:
+                # Return good connection to pool
+                self.release_connection(conn)
 
     # ==================== NEW: AGENTS TABLE ====================
     def create_agents_table(self):
@@ -91,7 +164,8 @@ class PGDB:
                             admin_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
                             is_active BOOLEAN DEFAULT TRUE,
                             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
                         );
                     """)
                     cursor.execute("""
@@ -103,11 +177,11 @@ class PGDB:
                         ON agents(admin_id);
                     """)
                 conn.commit()
-                logging.info("✅ agents table created with avatar_url")
+                logging.info(" agents table created with avatar_url")
             except Exception as e:
                 logging.error(f"Error creating agents table: {e}")
 
-    def add_agent_fields_if_not_exists(self):
+    def ensure_agent_schema_migration(self):
         """
         Add new fields to agents table if they don't exist.
         Handles schema migrations for existing databases.
@@ -115,63 +189,159 @@ class PGDB:
         with self.get_connection_context() as conn:
             try:
                 with conn.cursor() as cursor:
-                    # Add user_id column (nullable, references users)
-                    cursor.execute("""
-                        DO $$ 
-                        BEGIN
-                            IF NOT EXISTS (
-                                SELECT 1 FROM information_schema.columns 
-                                WHERE table_name='agents' AND column_name='user_id'
-                            ) THEN
-                                ALTER TABLE agents 
-                                ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
-                                
-                                CREATE INDEX idx_agents_user ON agents(user_id);
-                            END IF;
-                        END $$;
-                    """)
-                conn.commit()
-                logging.info("✅ Agent fields migration completed")
+                    # Check for user_id column explicitly
+                    cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='user_id'")
+                    if not cursor.fetchone():
+                        logging.info(" Adding user_id column to agents table...")
+                        cursor.execute("ALTER TABLE agents ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;")
+                        cursor.execute("CREATE INDEX idx_agents_user ON agents(user_id);")
+                        conn.commit()
+                        logging.info(" user_id column ADDED successfully")
+                    else:
+                        logging.info(" user_id column already exists (skipping)")
+
+                    # Check for owner_email
+                    cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='owner_email'")
+                    if not cursor.fetchone():
+                        logging.info(" Adding owner_email column to agents table...")
+                        cursor.execute("ALTER TABLE agents ADD COLUMN owner_email VARCHAR(100);")
+                        conn.commit()
+                        logging.info(" owner_email column ADDED successfully")
+                    
+                    # Check for business_hours_start
+                    cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='business_hours_start'")
+                    if not cursor.fetchone():
+                        logging.info(" Adding business_hours_start column to agents table...")
+                        cursor.execute("ALTER TABLE agents ADD COLUMN business_hours_start VARCHAR(5);")
+                        conn.commit()
+                    
+                    # Check for business_hours_end
+                    cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='business_hours_end'")
+                    if not cursor.fetchone():
+                        logging.info(" Adding business_hours_end column to agents table...")
+                        cursor.execute("ALTER TABLE agents ADD COLUMN business_hours_end VARCHAR(5);")
+                        conn.commit()
+                    
+                    # Check for allowed_minutes
+                    cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='allowed_minutes'")
+                    if not cursor.fetchone():
+                        logging.info(" Adding allowed_minutes column to agents table...")
+                        cursor.execute("ALTER TABLE agents ADD COLUMN allowed_minutes INTEGER DEFAULT 0;")
+                        conn.commit()
+                    
+                    # Check for used_minutes
+                    cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='used_minutes'")
+                    if not cursor.fetchone():
+                        logging.info(" Adding used_minutes column to agents table...")
+                        cursor.execute("ALTER TABLE agents ADD COLUMN used_minutes DOUBLE PRECISION DEFAULT 0.0;")
+                        conn.commit()
+                        logging.info(" used_minutes column ADDED successfully")
+                        
             except Exception as e:
                 logging.error(f"Error adding agent fields: {e}")
+                # Try to rollback if possible
+                try:
+                    conn.rollback()
+                except:
+                    pass
+
+    def ensure_user_schema_migration(self):
+        """
+        Add new fields to users table if they don't exist.
+        Handles schema migrations for existing databases.
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    # Check for business_details_submitted column
+                    cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='business_details_submitted'")
+                    if not cursor.fetchone():
+                        logging.info(" Adding business_details_submitted column to users table...")
+                        cursor.execute("ALTER TABLE users ADD COLUMN business_details_submitted BOOLEAN DEFAULT FALSE;")
+                        conn.commit()
+                        logging.info(" business_details_submitted column ADDED successfully")
+                    else:
+                        logging.info("ℹ business_details_submitted column already exists (skipping)")
+                    
+                    # Check for is_check column
+                    cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='is_check'")
+                    if not cursor.fetchone():
+                        logging.info(" Adding is_check column to users table...")
+                        cursor.execute("ALTER TABLE users ADD COLUMN is_check BOOLEAN DEFAULT FALSE;")
+                        conn.commit()
+                        logging.info(" is_check column ADDED successfully")
+                    else:
+                        logging.info(" is_check column already exists (skipping)")
+
+                    # Check for agent_id column
+                    cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='agent_id'")
+                    if not cursor.fetchone():
+                        logging.info(" Adding agent_id column to users table...")
+                        cursor.execute("ALTER TABLE users ADD COLUMN agent_id INTEGER;")
+                        conn.commit()
+                        logging.info(" agent_id column ADDED successfully")
+                    else:
+                        logging.info(" agent_id column already exists (skipping)")
+                        
+            except Exception as e:
+                logging.error(f"Error adding user fields: {e}")
+                # Try to rollback if possible
+                try:
+                    conn.rollback()
+                except:
+                    pass
 
 
     def get_agent_by_phone(self, phone_number: str):
         """
         Get specific agent details by phone number.
-        ✅ Now includes owner_email, business_hours, and minutes.
+        Only returns active agents (those that can receive calls).
         """
         with self.get_connection_context() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("""
                     SELECT 
-                        id AS agent_id,
-                        agent_name, 
-                        industry, 
-                        system_prompt, 
-                        voice_type,
-                        language,
-                        owner_name,
-                        owner_email,
-                        business_hours_start,
-                        business_hours_end,
-                        allowed_minutes,
-                        COALESCE(used_minutes, 0) as used_minutes
-                    FROM agents 
-                    WHERE phone_number = %s AND is_active = TRUE
+                        a.id AS agent_id,
+                        a.agent_name, 
+                        a.industry, 
+                        a.system_prompt, 
+                        a.voice_type,
+                        a.language,
+                        a.owner_name,
+                        a.owner_email,
+                        a.business_hours_start,
+                        a.business_hours_end,
+                        a.allowed_minutes,
+                        COALESCE(a.used_minutes, 0) as used_minutes
+                    FROM agents a
+                    WHERE a.phone_number = %s 
+                    AND a.is_active = TRUE
                     LIMIT 1
                 """, (phone_number,))
                 return cursor.fetchone()
 
     def get_agents_by_admin(self, admin_id: int):
-        """Get all agents for a specific admin"""
+        """Get all agents for a specific admin (agents created by this admin)"""
         with self.get_connection_context() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("""
-                    SELECT * FROM agents 
-                    WHERE admin_id = %s
-                    ORDER BY created_at DESC
+                    SELECT a.*
+                    FROM agents a
+                    WHERE a.admin_id = %s
+                    ORDER BY a.created_at DESC
                 """, (admin_id,))
+                return cursor.fetchall()
+
+    def get_agents_for_user(self, user_id: int):
+        """Get all agents assigned to a specific user (via user_id field)"""
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT a.*
+                    FROM agents a
+                    WHERE (a.user_id = %s OR a.admin_id = %s) AND a.is_active = TRUE
+                    ORDER BY a.created_at DESC
+                """, (user_id, user_id))
                 return cursor.fetchall()
 
     def delete_agent(self, agent_id: int, admin_id: int):
@@ -264,7 +434,7 @@ class PGDB:
             try:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT id, username, email, password_hash, first_name, last_name, created_at, is_admin
+                        SELECT id, username, email, password_hash, first_name, last_name, created_at, is_admin, business_details_submitted, is_check
                         FROM users
                         WHERE username = %s OR email = %s
                         LIMIT 1
@@ -273,23 +443,29 @@ class PGDB:
                     result = cursor.fetchone()
 
                     if not result:
-                        logging.error(f"❌ No user found with email: {user_data['email']}")
+                        logging.error(f" No user found with email: {user_data['email']}")
                         raise ValueError("Invalid username or password.")
                     
-                    logging.info(f"✅ User found: {result[1]} ({result[2]})")
-                    logging.info(f"🔐 Checking password...")
+                    logging.info(f" User found: {result[1]} ({result[2]})")
+                    logging.info(f" Checking password...")
                     
                     if bcrypt.checkpw(user_data['password'].encode('utf-8'), result[3].encode('utf-8')):
-                        logging.info(f"✅ Password correct for user: {result[2]}")
+                        logging.info(f" Password correct for user: {result[2]}")
+                        is_admin = result[7]
+                        business_details_submitted = result[8] if result[8] is not None else False
+                        is_check = result[9] if result[9] is not None else False
                         return {
                             "id": result[0],
                             "username": result[1],
                             "email": result[2],
                             "created_at": result[6],
-                            "is_admin": result[7]
+                            "is_admin": is_admin,
+                            "role": "admin" if is_admin else "user",
+                            "business_details_submitted": business_details_submitted,
+                            "is_check": is_check
                         }
                     else:
-                        logging.error(f"❌ Password incorrect for user: {result[2]}")
+                        logging.error(f" Password incorrect for user: {result[2]}")
                         raise ValueError("Invalid username or password.")
             except Exception as e:
                 logging.error(f"Error during login: {str(e)}")
@@ -303,7 +479,42 @@ class PGDB:
                     "SELECT id, first_name, last_name, username, email, is_admin, created_at FROM users WHERE id = %s",
                     (user_id,)
                 )
-                return cursor.fetchone()
+                user = cursor.fetchone()
+                if user:
+                    # Add role field based on is_admin
+                    user['role'] = 'admin' if user.get('is_admin', False) else 'user'
+                return user
+
+    def mark_business_details_submitted(self, user_id: int):
+        """
+        Mark that user has submitted business details.
+        Sets business_details_submitted flag and is_check flag to true.
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        UPDATE users 
+                        SET business_details_submitted = TRUE,
+                            is_check = TRUE,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING id;
+                    """, (user_id,))
+                    result = cursor.fetchone()
+                conn.commit()
+                
+                if result:
+                    logging.info(f" User {user_id} marked as having submitted business details (is_check = true)")
+                    return True
+                else:
+                    logging.warning(f" User {user_id} not found when marking business details")
+                    return False
+                    
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error marking business details submitted: {e}")
+                raise
 
     def get_all_users(self, page: int = 1, page_size: int = 20, search: str = None):
         """
@@ -362,14 +573,26 @@ class PGDB:
     def get_all_users_simple(self):
         """
         Get simplified list of all users for dropdowns.
-        Returns only id, username, and email.
+        Returns id, username, email, is_admin, and agent_is_active (if user has an active agent).
         """
         with self.get_connection_context() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("""
-                    SELECT id, username, email, is_admin
-                    FROM users
-                    ORDER BY username ASC
+                    SELECT 
+                        u.id, 
+                        u.username, 
+                        u.email, 
+                        u.is_admin,
+                        COALESCE(
+                            (SELECT a.is_active 
+                             FROM agents a 
+                             WHERE a.user_id = u.id 
+                             ORDER BY a.created_at DESC 
+                             LIMIT 1),
+                            FALSE
+                        ) AS is_active
+                    FROM users u
+                    ORDER BY u.username ASC
                 """)
                 return cursor.fetchall()
 
@@ -433,7 +656,7 @@ class PGDB:
                     
                     action = "promoted to" if is_admin else "demoted from"
                     logging.info(
-                        f"✅ User {target_user['username']} (ID: {user_id}) "
+                        f" User {target_user['username']} (ID: {user_id}) "
                         f"{action} admin by admin ID: {admin_id}"
                     )
                     
@@ -473,60 +696,138 @@ class PGDB:
                         ON user_agent_status(agent_id);
                     """)
                 conn.commit()
-                logging.info("✅ user_agent_status table created")
+                logging.info(" user_agent_status table created")
             except Exception as e:
                 logging.error(f"Error creating user_agent_status table: {e}")
 
-    def toggle_agent_status_for_user(self, user_id: int, agent_id: int, is_active: bool):
+    # def toggle_agent_status_for_user(self, user_id: int, agent_id: int, is_active: bool):
+    #     """
+    #     Toggle agent active/inactive status.
+    #     Updates the agents.is_active column directly to control call reception.
+        
+    #     Ownership Rules:
+    #     - Admins (creator) can toggle agents they created (admin_id match)
+    #     - Regular users can toggle agents assigned to them (user_id match)
+    #     """
+    #     with self.get_connection_context() as conn:
+    #         try:
+    #             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+    #                 # Verify the agent exists and get ownership info
+    #                 cursor.execute("""
+    #                     SELECT id, admin_id, user_id FROM agents 
+    #                     WHERE id = %s
+    #                 """, (agent_id,))
+                    
+    #                 agent = cursor.fetchone()
+    #                 if not agent:
+    #                     raise ValueError("Agent not found")
+                    
+    #                 # Check if user is the admin who created the agent
+    #                 is_creator = agent["admin_id"] == user_id
+                    
+    #                 # Check if user is assigned to this agent
+    #                 is_assigned_user = agent.get("user_id") == user_id
+                    
+    #                 # Allow access if user is either creator OR assigned user
+    #                 has_access = is_creator or is_assigned_user
+                    
+    #                 logging.info(
+    #                     f" Toggle attempt - User: {user_id}, Agent: {agent_id}, "
+    #                     f"Creator: {is_creator}, Assigned: {is_assigned_user}, "
+    #                     f"Admin ID: {agent['admin_id']}, User ID: {agent.get('user_id')}"
+    #                 )
+                    
+    #                 if not has_access:
+    #                     raise ValueError("Access denied: You don't own this agent")
+                    
+    #                 # Update the agents.is_active column directly
+    #                 cursor.execute("""
+    #                     UPDATE agents 
+    #                     SET is_active = %s,
+    #                         updated_at = CURRENT_TIMESTAMP
+    #                     WHERE id = %s
+    #                     RETURNING id, is_active;
+    #                 """, (is_active, agent_id))
+                    
+    #                 result = cursor.fetchone()
+    #             conn.commit()
+                
+    #             logging.info(
+    #                 f" Agent {agent_id} status updated: "
+    #                 f"{'active' if is_active else 'inactive'}"
+    #             )
+                
+    #             return {
+    #                 "agent_id": agent_id,
+    #                 "is_active": result["is_active"]
+    #             }
+                
+    #         except ValueError as ve:
+    #             conn.rollback()
+    #             raise ve
+    #         except Exception as e:
+    #             conn.rollback()
+    #             logging.error(f"Error toggling agent status: {e}")
+    #             raise
+
+
+
+    def toggle_agent_status_admin(self, admin_id: int, agent_id: int, is_active: bool):
         """
-        Toggle agent active/inactive status for a specific user.
-        Creates a new record if it doesn't exist, updates if it does.
+        Admin-only global agent activation toggle.
+
+        Rules:
+        - Only the admin who created the agent can toggle it
+        - Updates agents.is_active directly
         """
         with self.get_connection_context() as conn:
             try:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    # First verify the agent exists and belongs to this user (admin)
+                    # 🔍 Verify agent exists and belongs to admin
                     cursor.execute("""
-                        SELECT id FROM agents 
-                        WHERE id = %s AND admin_id = %s
-                    """, (agent_id, user_id))
-                    
-                    if not cursor.fetchone():
-                        raise ValueError("Agent not found or access denied")
-                    
-                    # Insert or update the status
+                        SELECT id, admin_id, is_active
+                        FROM agents
+                        WHERE id = %s
+                    """, (agent_id,))
+
+                    agent = cursor.fetchone()
+                    if not agent:
+                        raise ValueError("Agent not found")
+
+                    if agent["admin_id"] != admin_id:
+                        raise ValueError("Access denied: You do not own this agent")
+
+                    # 🔄 Update global status
                     cursor.execute("""
-                        INSERT INTO user_agent_status (user_id, agent_id, is_active, updated_at)
-                        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
-                        ON CONFLICT (user_id, agent_id) 
-                        DO UPDATE SET 
-                            is_active = EXCLUDED.is_active,
+                        UPDATE agents
+                        SET is_active = %s,
                             updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
                         RETURNING id, is_active;
-                    """, (user_id, agent_id, is_active))
-                    
+                    """, (is_active, agent_id))
+
                     result = cursor.fetchone()
-                conn.commit()
-                
-                logging.info(
-                    f"✅ Agent {agent_id} status updated for user {user_id}: "
-                    f"{'active' if is_active else 'inactive'}"
-                )
-                
-                return {
-                    "id": result["id"],
-                    "user_id": user_id,
-                    "agent_id": agent_id,
-                    "is_active": result["is_active"]
-                }
-                
-            except ValueError as ve:
+                    conn.commit()
+
+                    logging.info(
+                        f"Admin {admin_id} set Agent {agent_id} "
+                        f"to {'active' if is_active else 'inactive'}"
+                    )
+
+                    return {
+                        "agent_id": result["id"],
+                        "is_active": result["is_active"]
+                    }
+
+            except ValueError:
                 conn.rollback()
-                raise ve
+                raise
             except Exception as e:
                 conn.rollback()
                 logging.error(f"Error toggling agent status: {e}")
                 raise
+
+
 
     def get_agent_status_for_user(self, user_id: int, agent_id: int):
         """Get the activation status of an agent for a specific user"""
@@ -631,11 +932,11 @@ class PGDB:
                 ExpiresIn=expiration
             )
             
-            logging.info(f"✅ Generated presigned URL (expires in {expiration}s): {blob_path}")
+            logging.info(f" Generated presigned URL (expires in {expiration}s): {blob_path}")
             return url
             
         except Exception as e:
-            logging.error(f"❌ Failed to generate presigned URL: {e}")
+            logging.error(f" Failed to generate presigned URL: {e}")
             return None
 
     def insert_call_history(
@@ -869,14 +1170,16 @@ class PGDB:
                     cursor.execute(count_sql, tuple(params))
                     total = cursor.fetchone()["count"]
                     
-                    # Count by status
+                    # Count by status categories
                     cursor.execute(f"""
                         SELECT 
-                            COUNT(CASE WHEN ch.status = 'completed' THEN 1 END) as completed_calls,
-                            COUNT(CASE WHEN ch.status = 'unanswered' THEN 1 END) as unanswered_calls,
-                            COUNT(CASE WHEN ch.status NOT IN ('completed', 'unanswered') THEN 1 END) as other_calls
+                            COUNT(DISTINCT CASE WHEN ch.status = 'spam' THEN ch.id END) as spam_calls,
+                            COUNT(DISTINCT CASE WHEN ch.status IN ('unanswered', 'failed', 'busy') THEN ch.id END) as missed_calls,
+                            COUNT(DISTINCT CASE WHEN ch.status = 'completed' AND appt.id IS NULL THEN ch.id END) as query_calls,
+                            COUNT(DISTINCT CASE WHEN appt.id IS NOT NULL THEN ch.id END) as booked_calls
                         FROM call_history ch
                         JOIN agents a ON ch.agent_id = a.id
+                        LEFT JOIN appointments appt ON ch.call_id = appt.call_id
                         WHERE {where_sql}
                     """, tuple(params))
                     status_counts = cursor.fetchone()
@@ -910,9 +1213,10 @@ class PGDB:
                     return {
                         "calls": rows,
                         "total": total,
-                        "completed_calls": status_counts["completed_calls"],
-                        "unanswered_calls": status_counts["unanswered_calls"],
-                        "other_calls": status_counts["other_calls"],
+                        "booked": status_counts["booked_calls"],
+                        "spam": status_counts["spam_calls"],
+                        "query": status_counts["query_calls"],
+                        "missed": status_counts["missed_calls"],
                         "page": page,
                         "page_size": page_size,
                         "total_pages": (total + page_size - 1) // page_size
@@ -1172,8 +1476,8 @@ class PGDB:
                     cursor.execute("""
                         SELECT COUNT(*) as total
                         FROM agents
-                        WHERE admin_id = %s AND is_active = TRUE
-                    """, (admin_id,))
+                        WHERE (admin_id = %s OR user_id = %s) AND is_active = TRUE
+                    """, (admin_id, admin_id))
                     total_agents = cursor.fetchone()["total"]
                     
                     # Calculate offset
@@ -1207,11 +1511,11 @@ class PGDB:
                             MAX(ch.created_at) as last_call_at
                         FROM agents a
                         LEFT JOIN call_history ch ON a.id = ch.agent_id
-                        WHERE a.admin_id = %s AND a.is_active = TRUE
+                        WHERE (a.admin_id = %s OR a.user_id = %s) AND a.is_active = TRUE
                         GROUP BY a.id
                         ORDER BY total_calls DESC, a.created_at DESC
                         LIMIT %s OFFSET %s
-                    """, (admin_id, page_size, offset))
+                    """, (admin_id, admin_id, page_size, offset))
                     
                     agents = cursor.fetchall()
                     
@@ -1319,8 +1623,8 @@ class PGDB:
                         SELECT 
                             a.*
                         FROM agents a
-                        WHERE a.id = %s AND a.admin_id = %s
-                    """, (agent_id, admin_id))
+                        WHERE a.id = %s AND (a.admin_id = %s OR a.user_id = %s)
+                    """, (agent_id, admin_id, admin_id))
                     
                     agent = cursor.fetchone()
                     
@@ -1447,7 +1751,7 @@ class PGDB:
                     ))
                     result = cursor.fetchone()
                 conn.commit()
-                logging.info(f"✅ Created agent {result['id']} with minutes limit")
+                logging.info(f" Created agent {result['id']} with minutes limit")
                 return result
             except Exception as e:
                 conn.rollback()
@@ -1507,12 +1811,44 @@ class PGDB:
                     result = cursor.fetchone()
                 
                 conn.commit()
-                logging.info(f"✅ Updated agent {agent_id}")
+                logging.info(f" Updated agent {agent_id}")
                 return result
                 
             except Exception as e:
                 conn.rollback()
                 logging.error(f"Error updating agent: {e}")
+                raise
+       
+
+    def update_user_agent_id(self, user_id: int, agent_id: int):
+        """
+        Update user's agent_id column with the newly created agent ID.
+        This links the user to their assigned agent.
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        UPDATE users 
+                        SET agent_id = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING id;
+                    """, (agent_id, user_id))
+                    
+                    result = cursor.fetchone()
+                    conn.commit()
+                    
+                    if result:
+                        logging.info(f" User {user_id} linked to Agent {agent_id}")
+                        return True
+                    else:
+                        logging.warning(f" User {user_id} not found when linking to agent")
+                        return False
+                        
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error updating user agent_id: {e}")
                 raise
        
 
@@ -1609,284 +1945,8 @@ class PGDB:
 
 
 
-    def create_voice_samples_table(self):
-        """Create voice_samples table"""
-        with self.get_connection_context() as conn:
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS voice_samples (
-                            id SERIAL PRIMARY KEY,
-                            voice_name VARCHAR(100) NOT NULL,
-                            voice_id VARCHAR(50) NOT NULL UNIQUE,
-                            language VARCHAR(10) NOT NULL,
-                            country_code VARCHAR(5) NOT NULL,
-                            gender VARCHAR(10),
-                            audio_blob_path TEXT NOT NULL,
-                            duration_seconds FLOAT,
-                            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-                        );
-                    """)
-                    cursor.execute("""
-                        CREATE INDEX IF NOT EXISTS idx_voice_samples_language 
-                        ON voice_samples(language);
-                    """)
-                    cursor.execute("""
-                        CREATE INDEX IF NOT EXISTS idx_voice_samples_gender 
-                        ON voice_samples(gender);
-                    """)
-                conn.commit()
-                logging.info("✅ voice_samples table created")
-            except Exception as e:
-                logging.error(f"Error creating voice_samples table: {e}")
+
         
-
-    def insert_voice_sample(self, voice_data: dict):
-        """Insert a voice sample record (without updated_at)"""
-        with self.get_connection_context() as conn:
-            try:
-                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute("""
-                        INSERT INTO voice_samples (
-                            voice_name, voice_id, language, country_code, 
-                            gender, audio_blob_path, duration_seconds
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (voice_id) DO UPDATE SET
-                            audio_blob_path = EXCLUDED.audio_blob_path
-                        RETURNING *;
-                    """, (
-                        voice_data["voice_name"],
-                        voice_data["voice_id"],
-                        voice_data["language"],
-                        voice_data["country_code"],
-                        voice_data.get("gender"),
-                        voice_data["audio_blob_path"],
-                        voice_data.get("duration_seconds")
-                    ))
-                    result = cursor.fetchone()
-                conn.commit()
-                logging.info(f"✅ Voice sample saved: {voice_data['voice_name']}")
-                return result
-            except Exception as e:
-                conn.rollback()
-                logging.error(f"Error inserting voice sample: {e}")
-                raise
-        
-
-    def get_all_voice_samples(self):
-        """Get all voice samples"""
-        with self.get_connection_context() as conn:  # ← CHANGED THIS LINE
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    SELECT 
-                        id, voice_name, voice_id, language, 
-                        country_code, gender, audio_blob_path,
-                        duration_seconds, created_at
-                    FROM voice_samples
-                    ORDER BY language, voice_name
-                """)
-                return cursor.fetchall()
-
-    def get_voice_samples_by_language(self, language: str):
-        """Get voice samples filtered by language"""
-        with self.get_connection_context() as conn:  # ← CHANGED THIS LINE
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    SELECT 
-                        id, voice_name, voice_id, language, 
-                        country_code, gender, audio_blob_path,
-                        duration_seconds, created_at
-                    FROM voice_samples
-                    WHERE language = %s
-                    ORDER BY voice_name
-                """, (language,))
-                return cursor.fetchall()
-        
- # ==================== SUBSCRIPTIONS TABLE ====================
-    def create_subscriptions_table(self):
-        """Create subscriptions table to manage user subscription cycles"""
-        with self.get_connection_context() as conn:
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS subscriptions (
-                            id SERIAL PRIMARY KEY,
-                            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-                            total_minutes_allocated INTEGER NOT NULL DEFAULT 0,
-                            minutes_used DECIMAL(10, 2) DEFAULT 0,
-                            cycle_start_date TIMESTAMPTZ NOT NULL,
-                            cycle_end_date TIMESTAMPTZ NOT NULL,
-                            status VARCHAR(20) DEFAULT 'Active' CHECK (status IN ('Active', 'Expired')),
-                            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-                        );
-                    """)
-                    cursor.execute("""
-                        CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id 
-                        ON subscriptions(user_id);
-                    """)
-                    cursor.execute("""
-                        CREATE INDEX IF NOT EXISTS idx_subscriptions_status 
-                        ON subscriptions(status);
-                    """)
-                    cursor.execute("""
-                        CREATE INDEX IF NOT EXISTS idx_subscriptions_cycle_dates 
-                        ON subscriptions(cycle_start_date, cycle_end_date);
-                    """)
-                conn.commit()
-                logging.info("✅ subscriptions table created")
-            except Exception as e:
-                logging.error(f"Error creating subscriptions table: {e}")
-
-    def create_subscription(self, subscription_data: dict):
-        """Create a new subscription for a user"""
-        with self.get_connection_context() as conn:
-            try:
-                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute("""
-                        INSERT INTO subscriptions (
-                            user_id, total_minutes_allocated, minutes_used,
-                            cycle_start_date, cycle_end_date, status
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        RETURNING *;
-                    """, (
-                        subscription_data['user_id'],
-                        subscription_data.get('total_minutes_allocated', 0),
-                        subscription_data.get('minutes_used', 0),
-                        subscription_data['cycle_start_date'],
-                        subscription_data['cycle_end_date'],
-                        subscription_data.get('status', 'Active')
-                    ))
-                    result = cursor.fetchone()
-                conn.commit()
-                logging.info(f"✅ Created subscription {result['id']} for user {subscription_data['user_id']}")
-                return result
-            except Exception as e:
-                conn.rollback()
-                logging.error(f"Error creating subscription: {e}")
-                raise
-
-    def get_subscription_by_user(self, user_id: int):
-        """Get active subscription for a user"""
-        with self.get_connection_context() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    SELECT * FROM subscriptions
-                    WHERE user_id = %s AND status = 'Active'
-                    ORDER BY cycle_start_date DESC
-                    LIMIT 1
-                """, (user_id,))
-                return cursor.fetchone()
-
-    def update_subscription_minutes(self, subscription_id: int, minutes_to_add: float):
-        """Update minutes used in a subscription"""
-        with self.get_connection_context() as conn:
-            try:
-                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute("""
-                        UPDATE subscriptions
-                        SET minutes_used = minutes_used + %s,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                        RETURNING *;
-                    """, (round(minutes_to_add, 2), subscription_id))
-                    result = cursor.fetchone()
-                conn.commit()
-                logging.info(f"✅ Updated subscription {subscription_id} minutes")
-                return result
-            except Exception as e:
-                conn.rollback()
-                logging.error(f"Error updating subscription minutes: {e}")
-                raise
-
-    def expire_subscription(self, subscription_id: int):
-        """Mark a subscription as expired"""
-        with self.get_connection_context() as conn:
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("""
-                        UPDATE subscriptions
-                        SET status = 'Expired',
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                        RETURNING id;
-                    """, (subscription_id,))
-                    result = cursor.fetchone()
-                conn.commit()
-                logging.info(f"✅ Expired subscription {subscription_id}")
-                return bool(result)
-            except Exception as e:
-                conn.rollback()
-                logging.error(f"Error expiring subscription: {e}")
-                raise
-
-    def get_user_plan_usage(self, user_id: int):
-        """
-        Get user's plan usage statistics for dashboard display.
-        Returns total minutes, used minutes, remaining minutes, percentage used,
-        and days until reset.
-        """
-        with self.get_connection_context() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    SELECT 
-                        id,
-                        total_minutes_allocated,
-                        minutes_used,
-                        cycle_start_date,
-                        cycle_end_date,
-                        status
-                    FROM subscriptions
-                    WHERE user_id = %s AND status = 'Active'
-                    ORDER BY cycle_start_date DESC
-                    LIMIT 1
-                """, (user_id,))
-                
-                subscription = cursor.fetchone()
-                
-                # If no active subscription, return default values
-                if not subscription:
-                    return {
-                        "has_subscription": False,
-                        "total_minutes": 0,
-                        "used_minutes": 0,
-                        "remaining_minutes": 0,
-                        "percentage_used": 0,
-                        "days_until_reset": None,
-                        "cycle_end_date": None,
-                        "status": "No Active Plan"
-                    }
-                
-                # Calculate statistics
-                total_minutes = float(subscription["total_minutes_allocated"])
-                used_minutes = float(subscription["minutes_used"])
-                remaining_minutes = max(0, total_minutes - used_minutes)
-                percentage_used = round((used_minutes / total_minutes * 100) if total_minutes > 0 else 0, 1)
-                
-                # Calculate days until reset
-                from datetime import datetime, timezone
-                now = datetime.now(timezone.utc)
-                cycle_end = subscription["cycle_end_date"]
-                
-                # Ensure cycle_end is timezone-aware
-                if cycle_end.tzinfo is None:
-                    cycle_end = cycle_end.replace(tzinfo=timezone.utc)
-                
-                days_until_reset = (cycle_end - now).days
-                
-                return {
-                    "has_subscription": True,
-                    "total_minutes": int(total_minutes),
-                    "used_minutes": round(used_minutes, 2),
-                    "remaining_minutes": round(remaining_minutes, 2),
-                    "percentage_used": percentage_used,
-                    "days_until_reset": max(0, days_until_reset),
-                    "cycle_end_date": cycle_end.isoformat(),
-                    "status": "Active"
-                }
-
 
     # ==================== APPOINTMENTS TABLE ====================
     def create_appointments_table(self):
@@ -1924,7 +1984,7 @@ class PGDB:
                         ON appointments(scheduled_time);
                     """)
                 conn.commit()
-                logging.info("✅ appointments table created")
+                logging.info(" appointments table created")
             except Exception as e:
                 logging.error(f"Error creating appointments table: {e}")
 
@@ -1949,7 +2009,7 @@ class PGDB:
                     ))
                     result = cursor.fetchone()
                 conn.commit()
-                logging.info(f"✅ Created appointment {result['id']} for user {appointment_data['user_id']}")
+                logging.info(f" Created appointment {result['id']} for user {appointment_data['user_id']}")
                 return result
             except Exception as e:
                 conn.rollback()
@@ -2009,7 +2069,7 @@ class PGDB:
                     """, (status, appointment_id))
                     result = cursor.fetchone()
                 conn.commit()
-                logging.info(f"✅ Updated appointment {appointment_id} status to {status}")
+                logging.info(f" Updated appointment {appointment_id} status to {status}")
                 return result
             except Exception as e:
                 conn.rollback()
@@ -2030,7 +2090,7 @@ class PGDB:
                     """, (call_id, appointment_id))
                     result = cursor.fetchone()
                 conn.commit()
-                logging.info(f"✅ Linked appointment {appointment_id} to call {call_id}")
+                logging.info(f" Linked appointment {appointment_id} to call {call_id}")
                 return result
             except Exception as e:
                 conn.rollback()
@@ -2122,10 +2182,10 @@ class PGDB:
                     """)
                     
                 conn.commit()
-                logging.info("✅ Agent fields added/verified successfully")
+                logging.info(" Agent fields added/verified successfully")
             except Exception as e:
                 conn.rollback()
-                logging.error(f"❌ Error adding agent fields: {e}")
+                logging.error(f" Error adding agent fields: {e}")
                 raise
 
     def check_agent_minutes_available(self, agent_id: int) -> dict:
@@ -2190,12 +2250,12 @@ class PGDB:
                 
                 if result:
                     logging.info(
-                        f"✅ Agent {agent_id}: Used minutes updated to {result[1]}/{result[2]}"
+                        f" Agent {agent_id}: Used minutes updated to {result[1]}/{result[2]}"
                     )
                 return result
             except Exception as e:
                 conn.rollback()
-                logging.error(f"❌ Error updating used minutes: {e}")
+                logging.error(f" Error updating used minutes: {e}")
                 raise
 
     def reset_agent_minutes(self, agent_id: int, admin_id: int):
@@ -2230,11 +2290,11 @@ class PGDB:
                     result = cursor.fetchone()
                 conn.commit()
                 
-                logging.info(f"✅ Agent {agent_id} minutes reset (limit: {result[1]} min)")
+                logging.info(f" Agent {agent_id} minutes reset (limit: {result[1]} min)")
                 return True
             except Exception as e:
                 conn.rollback()
-                logging.error(f"❌ Error resetting minutes: {e}")
+                logging.error(f" Error resetting minutes: {e}")
                 raise
 
     def get_agent_with_minutes_check(self, agent_id: int):
@@ -2270,3 +2330,29 @@ class PGDB:
                 """, (agent_id,))
                 
                 return cursor.fetchone()
+
+    def get_user_call_statistics(self, user_id: int):
+        """
+        Get call statistics for a user.
+        Returns total calls, missed calls, and completed calls for agents
+        belonging to or assigned to this user.
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        COUNT(*) as total_calls,
+                        COUNT(CASE WHEN ch.status = 'unanswered' THEN 1 END) as missed_calls,
+                        COUNT(CASE WHEN ch.status = 'completed' THEN 1 END) as completed_calls
+                    FROM call_history ch
+                    INNER JOIN agents a ON ch.agent_id = a.id
+                    WHERE (a.admin_id = %s OR a.user_id = %s)
+                """, (user_id, user_id))
+                
+                result = cursor.fetchone()
+                
+                return {
+                    "total_calls": int(result["total_calls"]) if result else 0,
+                    "missed_calls": int(result["missed_calls"]) if result else 0,
+                    "completed_calls": int(result["completed_calls"]) if result else 0
+                }

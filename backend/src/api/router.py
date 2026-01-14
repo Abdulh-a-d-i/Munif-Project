@@ -108,108 +108,6 @@ def add_presigned_urls_to_call(call: dict) -> dict:
     
     return call
 
-# ==================== AUTH ENDPOINTS ====================
-@router.post("/register")
-def register_user(user: UserRegister):
-    user_dict = user.dict()
-    user_dict["email"] = user_dict["email"].strip().lower()
-    user_dict["username"] = user_dict["username"].strip().lower()
-    user_dict['is_admin'] = False
-    try:
-        db.register_user(user_dict)
-        return JSONResponse(status_code=201, content={"message": "You are registered successfully."})
-    except ValueError as ve:
-        return error_response(status_code=400, message=str(ve))
-    except Exception as e:
-        traceback.print_exc()
-        return error_response(status_code=500, message=f"Registration failed: {str(e)}")
-
-@router.post("/login", response_model=LoginResponse)
-def login_user(user: UserLogin):
-    try:
-        logging.info(f"📥 Login request received")
-        logging.info(f"📧 Email: {user.email}")
-        logging.info(f"🔑 Password length: {len(user.password) if user.password else 0}")
-        
-        user_dict = {
-            "email": user.email,
-            "password": user.password
-        }
-        logging.info(f"📦 User dict created: {user_dict}")
-        user_dict["email"] = user_dict["email"].strip().lower()
-        
-        result = db.login_user(user_dict)
-        if not result:
-            logging.warning(f"❌ Login failed for {user_dict['email']}")
-            return error_response("Invalid username or password", status_code=422)
-        
-        logging.info(f"✅ Login successful for {user_dict['email']}")
-        token = create_access_token({"sub": str(result["id"])})
-        return {
-            "access_token": token,
-            "token_type": "bearer",
-            "user": result
-        }
-    except ValueError as ve:
-        logging.error(f"❌ ValueError during login: {str(ve)}")
-        return error_response(str(ve), status_code=422)
-    except Exception as e:
-        logging.error(f"❌ Error during login: {str(e)}")
-        traceback.print_exc()
-        return error_response(f"Internal server error: {str(e)}", status_code=500)
-
-@router.post("/submit-business-details")
-async def submit_business_details(
-    details: BusinessDetailsRequest,
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Submit business details after signup.
-    Sends email to admin with user's business information for review.
-    User must be authenticated to submit details.
-    """
-    try:
-        # Get admin email from environment variable
-        admin_email = os.getenv("ADMIN_EMAIL")
-        if not admin_email:
-            logging.error("ADMIN_EMAIL not configured in environment variables")
-            return error_response("Admin email not configured", status_code=500)
-        
-        # Get user information
-        user_email = current_user.get("email")
-        user_name = current_user.get("username", "Unknown")
-        
-        # Send email to admin with business details
-        email_sent = await mail_obj.send_business_details_to_admin(
-            user_email=user_email,
-            user_name=user_name,
-            agent_name=details.agent_name,
-            business_name=details.business_name,
-            business_email=details.business_email,
-            industry=details.industry,
-            language=details.language,
-            admin_email=admin_email
-        )
-        
-        if not email_sent:
-            logging.error(f"Failed to send business details email for user {user_email}")
-            return error_response("Failed to send business details. Please try again.", status_code=500)
-        
-        logging.info(f"✅ Business details submitted successfully for user {user_email}")
-        
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "message": "Business details submitted successfully. Admin will review your request."
-            }
-        )
-        
-    except Exception as e:
-        logging.error(f"Error submitting business details: {str(e)}")
-        traceback.print_exc()
-        return error_response(f"Failed to submit business details: {str(e)}", status_code=500)
-
 # ==================== ADMIN USER MANAGEMENT ====================
 @router.get("/admin/users")
 async def get_all_users_admin(
@@ -315,33 +213,6 @@ async def update_user_admin_status_endpoint(
         logging.error(f"Error updating user admin status: {str(e)}")
         traceback.print_exc()
         return error_response(f"Failed to update admin status: {str(e)}", status_code=500)
-
-# ==================== USER PLAN USAGE ====================
-@router.get("/user/plan-usage")
-async def get_user_plan_usage(current_user: dict = Depends(get_current_user)):
-    """
-    Get user's plan usage statistics for dashboard display.
-    Shows total minutes, used minutes, remaining minutes, percentage used,
-    and days until reset.
-    """
-    try:
-        user_id = current_user["id"]
-        
-        # Get plan usage statistics
-        plan_usage = db.get_user_plan_usage(user_id)
-        
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "data": plan_usage
-            }
-        )
-        
-    except Exception as e:
-        logging.error(f"Error fetching plan usage: {e}")
-        traceback.print_exc()
-        return error_response("Failed to fetch plan usage", 500)
 
 
 # ==================== CALL STATUS ====================
@@ -467,7 +338,7 @@ async def get_user_call_history(
             call_data["transcript_text"] = transcript_text
             call_data["has_recording"] = bool(call.get("recording_blob"))
             
-            # 🔥 ADD PRESIGNED URLS
+            # ADD PRESIGNED URLS
             call_data = add_presigned_urls_to_call(call_data)
             
             calls.append(call_data)
@@ -631,7 +502,7 @@ async def save_call_data(request: Request):
         if call_duration_seconds is not None:
             updates["duration"] = float(call_duration_seconds)
             logging.info(
-                f"⏱️ Call {call_id}: Duration = {call_duration_seconds:.2f}s "
+                f" Call {call_id}: Duration = {call_duration_seconds:.2f}s "
                 f"({call_duration_seconds / 60:.2f} min)"
             )
         
@@ -653,7 +524,7 @@ async def save_call_data(request: Request):
         
         if updates:
             db.update_call_history(call_id, updates)
-            logging.info(f"✅ Call history updated for {call_id}")
+            logging.info(f" Call history updated for {call_id}")
         
         # Update agent's used_minutes (ACCUMULATIVE)
         if agent_id and call_duration_seconds and call_duration_seconds > 0:
@@ -672,7 +543,7 @@ async def save_call_data(request: Request):
                 new_used = new_check["used_minutes"]
                 
                 logging.info(
-                    f"✅ Agent {agent_id} minutes updated: "
+                    f" Agent {agent_id} minutes updated: "
                     f"{old_used:.2f} → {new_used:.2f} min "
                     f"(+{duration_minutes:.2f} min from call {call_id})"
                 )
@@ -680,12 +551,12 @@ async def save_call_data(request: Request):
                 # Warn if approaching limit
                 if new_check["remaining_minutes"] < 60:  # Less than 1 hour
                     logging.warning(
-                        f"⚠️ Agent {agent_id} low on minutes: "
+                        f" Agent {agent_id} low on minutes: "
                         f"{new_check['remaining_minutes']:.1f} min remaining"
                     )
                 
             except Exception as e:
-                logging.error(f"❌ Failed to update agent minutes: {e}")
+                logging.error(f" Failed to update agent minutes: {e}")
                 traceback.print_exc()
                 # Don't fail the entire request if minutes update fails
         
@@ -693,7 +564,7 @@ async def save_call_data(request: Request):
         if transcript_blob:
             async def delayed_transcript():
                 await asyncio.sleep(5)
-                logging.info(f"📥 Downloading transcript for {call_id}")
+                logging.info(f" Downloading transcript for {call_id}")
                 await fetch_and_store_transcript(call_id, None, transcript_blob)
             asyncio.create_task(delayed_transcript())
         
@@ -763,7 +634,7 @@ async def get_agent_call_history(
             call_data["transcript_text"] = transcript_text
             call_data["has_recording"] = bool(call.get("recording_blob"))
             
-            # 🔥 ADD PRESIGNED URLS
+            # ADD PRESIGNED URLS
             call_data = add_presigned_urls_to_call(call_data)
             
             calls.append(call_data)
@@ -793,22 +664,22 @@ async def get_agent_call_history(
 async def get_agent_config(phone_number: str):
     """
     Fetch agent configuration by phone number.
-    ✅ Checks minutes availability - blocks if exhausted.
-    ❌ Does NOT send minutes info to agent (security)
+    Checks minutes availability - blocks if exhausted.
+    Does NOT send minutes info to agent (security)
     """
     try:
         agent = db.get_agent_by_phone(phone_number)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         
-        # 🔥 Check if agent has available minutes
+        # Check if agent has available minutes
         agent_id = agent.get("agent_id")
         minutes_check = db.check_agent_minutes_available(agent_id)
         
-        # ❌ Block if no minutes remaining
+        # Block if no minutes remaining
         if not minutes_check["available"]:
             logging.warning(
-                f"⛔ Agent {agent_id} ({phone_number}): "
+                f" Agent {agent_id} ({phone_number}): "
                 f"No minutes remaining ({minutes_check['used_minutes']}/{minutes_check['allowed_minutes']})"
             )
             raise HTTPException(
@@ -816,9 +687,9 @@ async def get_agent_config(phone_number: str):
                 detail="Agent minutes exhausted"
             )
         
-        # ✅ Minutes available - send config WITHOUT minutes info
+        # Minutes available - send config WITHOUT minutes info
         logging.info(
-            f"✅ Agent {agent_id} config sent - "
+            f" Agent {agent_id} config sent - "
             f"{minutes_check['remaining_minutes']:.1f} minutes remaining"
         )
         agent = serialize_agent_data(dict(agent))
@@ -858,9 +729,9 @@ async def new_call(
             if '@' in cleaned_caller:
                 cleaned_caller = cleaned_caller.split('@')[0].replace('sip:', '')
             
-            logging.info(f"📞 Call from {cleaned_caller} to agent {agent['agent_id']}")
+            logging.info(f" Call from {cleaned_caller} to agent {agent['agent_id']}")
         else:
-            logging.info(f"📞 Call from unknown number to agent {agent['agent_id']}")
+            logging.info(f" Call from unknown number to agent {agent['agent_id']}")
         
         # INSERT call history with caller_number
         db.insert_call_history(
@@ -886,13 +757,13 @@ async def new_call(
 async def get_dashboard_analytics(current_user: dict = Depends(get_current_user)):
     """
     Get overall dashboard analytics.
-    ✅ Now includes minutes info for top agents.
+    Now includes minutes info for top agents.
     """
     try:
         user_id = current_user["id"]
         analytics = db.get_admin_dashboard_analytics(user_id)
         
-        # 🔥 ADD MINUTES INFO TO TOP AGENTS
+        # ADD MINUTES INFO TO TOP AGENTS
         for agent in analytics.get("top_agents", []):
             # Add presigned URLs
             if agent.get("avatar_url"):
@@ -930,13 +801,13 @@ async def get_all_agents(
 ):
     """
     Get paginated list of all agents with call statistics.
-    ✅ Now includes minutes info for each agent.
+    Now includes minutes info for each agent.
     """
     try:
         user_id = current_user["id"]
         result = db.get_agents_with_call_stats(user_id, page, page_size)
         
-        # 🔥 NEW: Add minutes info to each agent
+        # NEW: Add minutes info to each agent
         for agent in result.get("agents", []):
             # Add presigned URLs
             add_presigned_urls_to_agent(agent)
@@ -1027,7 +898,7 @@ async def create_agent(
     agent_name: str = Form(...),
     phone_number: str = Form(...),
     system_prompt: str = Form(...),
-    voice_type: str = Form(...),
+    voice_type: str = Form(None),  # Optional - can be empty
     language: str = Form("en"),
     industry: str = Form(None),
     owner_name: str = Form(None),
@@ -1037,14 +908,22 @@ async def create_agent(
     allowed_minutes: int = Form(0),          # NEW
     user_id: int = Form(None),               # NEW: Assign to user
     avatar: UploadFile = File(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_admin)  # Admin only - users cannot create agents
 ):
     """
     Create a new agent with optional avatar image.
-    ✅ Now includes owner_email, business_hours, and allowed_minutes.
+    ADMIN ONLY - Users cannot create agents.
+    Includes owner_email, business_hours, and allowed_minutes.
+    user_id: Select a user from dropdown to assign this agent to them.
+    voice_type is optional - defaults to 'female' if not provided.
     """
     try:
-        user_id = current_user["id"]
+        admin_id = current_user["id"]
+        assign_to_user_id = user_id  # user_id from form (dropdown selection)
+        
+        # Set default voice_type if not provided
+        if not voice_type:
+            voice_type = "female"
         
         # Check if phone number already exists
         existing = db.get_agent_by_phone(phone_number)
@@ -1067,11 +946,11 @@ async def create_agent(
             if not re.match(time_pattern, business_hours_end):
                 return error_response("Invalid business_hours_end format. Use HH:MM", 400)
         
-        # Validate user_id if provided
-        if user_id:
-            user = db.get_user_by_id(user_id)
+        # Validate user_id if provided (user selected from dropdown)
+        if assign_to_user_id:
+            user = db.get_user_by_id(assign_to_user_id)
             if not user:
-                return error_response(f"User with ID {user_id} not found", 404)
+                return error_response(f"User with ID {assign_to_user_id} not found", 404)
         
         # Validate allowed_minutes
         if allowed_minutes < 0:
@@ -1095,9 +974,9 @@ async def create_agent(
             
             try:
                 avatar_key = hetzner_storage.upload_avatar(content, file_extension)
-                logging.info(f"✅ Avatar uploaded with key: {avatar_key}")
+                logging.info(f" Avatar uploaded with key: {avatar_key}")
             except Exception as e:
-                logging.error(f"❌ Avatar upload failed: {e}")
+                logging.error(f" Avatar upload failed: {e}")
                 return error_response("Failed to upload avatar", 500)
         
         # Create agent data
@@ -1109,23 +988,59 @@ async def create_agent(
             "language": language,
             "industry": industry,
             "owner_name": owner_name,
-            "owner_email": owner_email,  # NEW
+            "owner_email": owner_email,
             "avatar_url": avatar_key,
-            "business_hours_start": business_hours_start,  # NEW
-            "business_hours_end": business_hours_end,      # NEW
-            "allowed_minutes": allowed_minutes,            # NEW
-            "user_id": user_id,                            # NEW: User assignment
-            "admin_id": current_user["id"]
+            "business_hours_start": business_hours_start,
+            "business_hours_end": business_hours_end,
+            "allowed_minutes": allowed_minutes,
+            "user_id": assign_to_user_id,  # User selected from dropdown
+            "admin_id": admin_id  # Admin creating the agent
         }
         
         # Save to database
         agent = db.create_agent_with_voice_type(agent_data)
         
-        # 🔥 FIX: Serialize time objects before JSON response
+        # Update user's agent_id if user was assigned
+        if assign_to_user_id:
+            try:
+                db.update_user_agent_id(assign_to_user_id, agent['agent_id'])
+                logging.info(f" Linked User {assign_to_user_id} to Agent {agent['agent_id']}")
+            except Exception as link_error:
+                # Don't fail agent creation if linking fails
+                logging.error(f" Failed to link user to agent: {link_error}")
+        
+        # FIX: Serialize time objects before JSON response
         agent = serialize_agent_data(agent)
         
         # Add presigned URL for response
         add_presigned_urls_to_agent(agent)
+        
+        # Send email notification to business owner if owner_email is provided
+        if owner_email:
+            try:
+                logging.info(f" Sending agent creation email to {owner_email}")
+                email_sent = await mail_obj.send_agent_created_email(
+                    owner_email=owner_email,
+                    owner_name=owner_name or "Valued Customer",
+                    agent_name=agent_name,
+                    phone_number=phone_number,
+                    voice_type=voice_type,
+                    language=language,
+                    industry=industry
+                )
+                
+                if email_sent:
+                    logging.info(f" Agent creation email sent successfully to {owner_email}")
+                else:
+                    logging.warning(f" Failed to send agent creation email to {owner_email}")
+            except Exception as email_error:
+                # Don't fail the entire agent creation if email fails
+                logging.error(f" Error sending agent creation email: {email_error}")
+                traceback.print_exc()
+        
+        # Rename 'id' to 'agent_id' for consistency in response
+        if 'id' in agent:
+            agent['agent_id'] = agent.pop('id')
         
         return JSONResponse(
             status_code=201,
@@ -1155,33 +1070,50 @@ async def update_agent(
     language: str = Form(None),
     industry: str = Form(None),
     owner_name: str = Form(None),
-    owner_email: str = Form(None),  # NEW
-    business_hours_start: str = Form(None),  # NEW
-    business_hours_end: str = Form(None),    # NEW
-    allowed_minutes: int = Form(None),       # NEW
-    user_id: int = Form(None),               # NEW: Update user assignment
+    owner_email: str = Form(None),
+    business_hours_start: str = Form(None),
+    business_hours_end: str = Form(None),
+    allowed_minutes: int = Form(None),
+    user_id: int = Form(None),  # For admin to update user assignment
     avatar: UploadFile = File(None),
     current_user: dict = Depends(get_current_user)
 ):
     """
     Update agent details with optional new avatar.
-    ✅ Now includes owner_email, business_hours, and allowed_minutes.
-    Note: used_minutes cannot be updated here - use reset endpoint instead.
+    
+    Role-Based Restrictions:
+    - ADMIN: Full access to all fields
+    - USER: Can edit agent_name, system_prompt, voice_type, language, industry, 
+            owner_name, owner_email, avatar. CANNOT edit phone_number, business_hours, 
+            allowed_minutes, or user_id.
     """
     try:
-        user_id = current_user["id"]
+        current_user_id = current_user["id"]
+        is_admin = current_user.get("is_admin", False)
         
         # Get existing agent
         existing_agent = db.get_agent_by_id(agent_id)
-        if not existing_agent or existing_agent["admin_id"] != user_id:
-            return error_response("Agent not found or unauthorized", 404)
+        if not existing_agent:
+            return error_response("Agent not found", 404)
         
-        # Build updates dict
+        # Authorization check based on role
+        if is_admin:
+            # Admin: Must be the admin who created the agent
+            if existing_agent["admin_id"] != current_user_id:
+                logging.error(f"Unauthorized agent update attempt. User {current_user_id} (Admin) tried to update agent {agent_id} owned by {existing_agent['admin_id']}")
+                return error_response("Agent not found or unauthorized", 404)
+        else:
+            # User: Agent must be assigned to this user
+            if existing_agent.get("user_id") != current_user_id:
+                logging.error(f"Unauthorized agent update attempt. User {current_user_id} (User) tried to update agent {agent_id} assigned to {existing_agent.get('user_id')}")
+                return error_response("Agent not found or unauthorized", 404)
+        
+        # Build updates dict with role-based restrictions
         updates = {}
+        
+        # Fields that ALL users can update
         if agent_name is not None:
             updates["agent_name"] = agent_name
-        if phone_number is not None:
-            updates["phone_number"] = phone_number
         if system_prompt is not None:
             updates["system_prompt"] = system_prompt
         if voice_type is not None:
@@ -1192,24 +1124,39 @@ async def update_agent(
             updates["industry"] = industry
         if owner_name is not None:
             updates["owner_name"] = owner_name
-        if owner_email is not None:  # NEW
+        if owner_email is not None:
             updates["owner_email"] = owner_email
-        if business_hours_start is not None:  # NEW
-            updates["business_hours_start"] = business_hours_start
-        if business_hours_end is not None:    # NEW
-            updates["business_hours_end"] = business_hours_end
-        if allowed_minutes is not None:       # NEW
-            if allowed_minutes < 0:
-                return error_response("allowed_minutes cannot be negative", 400)
-            updates["allowed_minutes"] = allowed_minutes
-        if user_id is not None:  # NEW: Update user assignment
-            # Validate user exists
-            user = db.get_user_by_id(user_id)
-            if not user:
-                return error_response(f"User with ID {user_id} not found", 404)
-            updates["user_id"] = user_id
         
+        # ADMIN-ONLY fields: phone_number, business_hours, allowed_minutes, user_id
+        if is_admin:
+            if phone_number is not None:
+                updates["phone_number"] = phone_number
+            if business_hours_start is not None:
+                updates["business_hours_start"] = business_hours_start
+            if business_hours_end is not None:
+                updates["business_hours_end"] = business_hours_end
+            if allowed_minutes is not None:
+                if allowed_minutes < 0:
+                    return error_response("allowed_minutes cannot be negative", 400)
+                updates["allowed_minutes"] = allowed_minutes
+            if user_id is not None:
+                # Validate user exists
+                user = db.get_user_by_id(user_id)
+                if not user:
+                    return error_response(f"User with ID {user_id} not found", 404)
+                updates["user_id"] = user_id
+        else:
+            # Non-admin user trying to update restricted fields - return error
+            if phone_number is not None:
+                return error_response("You don't have permission to update phone number", 403)
+            if business_hours_start is not None or business_hours_end is not None:
+                return error_response("You don't have permission to update business hours", 403)
+            if allowed_minutes is not None:
+                return error_response("You don't have permission to update allowed minutes", 403)
+            if user_id is not None:
+                return error_response("You don't have permission to change user assignment", 403)
         
+        # Validate business hours format if provided (admin only)
         if "business_hours_start" in updates:
             import re
             time_pattern = r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$'
@@ -1246,22 +1193,23 @@ async def update_agent(
                     hetzner_storage.delete_avatar(old_avatar_key)
                 
                 updates["avatar_url"] = new_avatar_key
-                logging.info(f"✅ Avatar updated: {new_avatar_key}")
+                logging.info(f" Avatar updated: {new_avatar_key}")
                 
             except Exception as e:
-                logging.error(f"❌ Avatar upload failed: {e}")
+                logging.error(f" Avatar upload failed: {e}")
                 return error_response("Failed to upload avatar", 500)
         
         if not updates:
             return error_response("No fields to update", 400)
         
-        # Update agent
-        result = db.update_agent_with_voice_type(agent_id, user_id, updates)
+        # Update agent - use admin_id for DB update
+        admin_id = existing_agent["admin_id"]
+        result = db.update_agent_with_voice_type(agent_id, admin_id, updates)
         
         if not result:
             return error_response("Update failed", 500)
         
-        # 🔥 FIX: Serialize time objects before JSON response
+        # Serialize time objects before JSON response
         result = serialize_agent_data(result)
         
         # Add presigned URL
@@ -1308,9 +1256,9 @@ async def delete_agent(
         if avatar_key:
             try:
                 hetzner_storage.delete_avatar(avatar_key)
-                logging.info(f"🗑️ Avatar deleted for agent {agent_id}")
+                logging.info(f" Avatar deleted for agent {agent_id}")
             except Exception as e:
-                logging.warning(f"?? Could not delete avatar: {e}")
+                logging.warning(f" Could not delete avatar: {e}")
         
         return JSONResponse(
             status_code=200,
@@ -1325,24 +1273,77 @@ async def delete_agent(
         traceback.print_exc()
         return error_response("Failed to delete agent", 500)
 
+# @router.post("/agents/toggle-status")
+# async def toggle_agent_status(
+#     request: ToggleAgentStatusRequest,
+#     current_user: dict = Depends(get_current_user)
+# ):
+#     """
+#     Toggle agent active/inactive status for the current user.
+#     When user presses active/inactive button, this updates their personal
+#     activation status for the agent.
+#     """
+#     try:
+#         user_id = current_user["id"]
+#         agent_id = request.agent_id
+#         is_active = request.is_active
+        
+#         # Admin Override: Allow setting status for another user
+#         if request.user_id:
+#             is_admin = current_user.get("is_admin") or current_user.get("role") == "admin"
+#             if is_admin:
+#                 logging.info(f"Admin {current_user['id']} toggling agent {agent_id} status for User {request.user_id}")
+#                 user_id = request.user_id
+#             else:
+#                 return error_response("Unauthorized: Only admins can specify user_id", 403)
+        
+#         # Toggle the status in the database
+#         result = db.toggle_agent_status_for_user(user_id, agent_id, is_active)
+        
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "message": f"Agent {'activated' if is_active else 'deactivated'} successfully",
+#                 "data": result
+#             }
+#         )
+        
+#     except ValueError as e:
+#         return error_response(str(e), 404)
+#     except Exception as e:
+#         logging.error(f"Error toggling agent status: {e}")
+#         traceback.print_exc()
+#         return error_response("Failed to toggle agent status", 500)
+
+
+
+
 @router.post("/agents/toggle-status")
 async def toggle_agent_status(
     request: ToggleAgentStatusRequest,
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Toggle agent active/inactive status for the current user.
-    When user presses active/inactive button, this updates their personal
-    activation status for the agent.
+    Admin-only: Activate or deactivate an agent globally.
     """
     try:
-        user_id = current_user["id"]
+        # 🔐 Admin check (strict)
+        is_admin = current_user.get("is_admin") or current_user.get("role") == "admin"
+        if not is_admin:
+            return error_response("Unauthorized: Only admins can toggle agent status", 403)
+
+        admin_id = current_user["id"]
         agent_id = request.agent_id
         is_active = request.is_active
-        
-        # Toggle the status in the database
-        result = db.toggle_agent_status_for_user(user_id, agent_id, is_active)
-        
+
+        # Toggle agent status (global)
+        result = db.toggle_agent_status_admin(
+            admin_id=admin_id,
+            agent_id=agent_id,
+            is_active=is_active
+        )
+
         return JSONResponse(
             status_code=200,
             content={
@@ -1351,13 +1352,14 @@ async def toggle_agent_status(
                 "data": result
             }
         )
-        
+
     except ValueError as e:
         return error_response(str(e), 404)
     except Exception as e:
         logging.error(f"Error toggling agent status: {e}")
         traceback.print_exc()
         return error_response("Failed to toggle agent status", 500)
+
 
 @router.get("/agents/{agent_id}/status")
 async def get_agent_status(
@@ -1416,217 +1418,6 @@ async def get_all_agent_statuses(
         return error_response("Failed to get agent statuses", 500)
 
 
-# ==================== CALL LOGS ====================
-@router.get("/call-logs")
-async def get_call_logs(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(25, ge=1, le=100),
-    search: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Get call logs with search and filters for the call logs page.
-    
-    Query Parameters:
-    - page: Page number (default: 1)
-    - page_size: Items per page (default: 25, max: 100)
-    - search: Search by caller ID or name
-    - status: Filter by status (completed, unanswered, all)
-    - date_from: Filter from date (ISO format)
-    - date_to: Filter to date (ISO format)
-    """
-    try:
-        user_id = current_user["id"]
-        
-        # Get filtered call logs
-        result = db.get_call_logs_with_filters(
-            admin_id=user_id,
-            page=page,
-            page_size=page_size,
-            search=search,
-            status_filter=status,
-            date_from=date_from,
-            date_to=date_to
-        )
-        
-        # Format calls for response
-        calls = []
-        for call in result.get("calls", []):
-            call_data = {**call}
-            
-            # Format timestamps
-            for field in ["created_at", "started_at", "ended_at"]:
-                if call.get(field):
-                    call_data[field] = call[field].isoformat() if hasattr(call[field], 'isoformat') else str(call[field])
-            
-            # Calculate duration if missing
-            if not call_data.get("duration") and call.get("started_at") and call.get("ended_at"):
-                try:
-                    start = call["started_at"] if isinstance(call["started_at"], datetime) else datetime.fromisoformat(str(call["started_at"]))
-                    end = call["ended_at"] if isinstance(call["ended_at"], datetime) else datetime.fromisoformat(str(call["ended_at"]))
-                    call_data["duration"] = round((end - start).total_seconds(), 1)
-                except:
-                    call_data["duration"] = 0
-            
-            # Format duration for display (e.g., "4m 12s")
-            if call_data.get("duration"):
-                duration_seconds = int(call_data["duration"])
-                minutes = duration_seconds // 60
-                seconds = duration_seconds % 60
-                call_data["duration_formatted"] = f"{minutes}m {seconds:02d}s"
-            else:
-                call_data["duration_formatted"] = "0m 00s"
-            
-            # Parse transcript
-            transcript_text = None
-            if call.get("transcript"):
-                try:
-                    tr = call["transcript"]
-                    if isinstance(tr, str):
-                        tr = json.loads(tr)
-                    if isinstance(tr, list):
-                        lines = []
-                        for msg in tr:
-                            if msg.get("type") == "message":
-                                speaker = "AI" if msg.get("role") == "assistant" else "User"
-                                text = " ".join(msg.get("content", [])) if isinstance(msg.get("content"), list) else str(msg.get("content"))
-                                lines.append(f"{speaker}: {text}")
-                        transcript_text = "\\n".join(lines)
-                except Exception as e:
-                    logging.warning(f"Transcript parse error: {e}")
-            
-            call_data["transcript_text"] = transcript_text
-            call_data["has_recording"] = bool(call.get("recording_blob"))
-            call_data["has_transcript"] = bool(transcript_text)
-            
-            # Add presigned URLs
-            call_data = add_presigned_urls_to_call(call_data)
-            
-            calls.append(call_data)
-        
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "data": {
-                    "calls": calls,
-                    "pagination": {
-                        "page": result["page"],
-                        "page_size": result["page_size"],
-                        "total": result["total"],
-                        "total_pages": result["total_pages"],
-                        "completed_calls": result["completed_calls"],
-                        "unanswered_calls": result["unanswered_calls"],
-                        "other_calls": result["other_calls"]
-                    }
-                }
-            }
-        )
-        
-    except Exception as e:
-        logging.error(f"Error fetching call logs: {e}")
-        traceback.print_exc()
-        return error_response("Failed to fetch call logs", 500)
-
-
-
-
-@router.get("/calls/{call_id}")
-async def get_call_details(
-    call_id: str,
-    agent_id: Optional[int] = Query(None),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Get complete call details including caller information, transcript, 
-    recording, and appointment details for the call details view.
-    """
-    try:
-        user_id = current_user["id"]
-        
-        call = db.get_call_by_id(call_id, agent_id)
-        
-        if not call:
-            return error_response("Call not found", 404)
-        
-        # Verify ownership
-        agent = db.get_agent_by_id(call["agent_id"])
-        if not agent or agent["admin_id"] != user_id:
-            return error_response("Unauthorized", 403)
-        
-        # Format timestamps
-        for field in ["created_at", "started_at", "ended_at", "updated_at"]:
-            if call.get(field):
-                if hasattr(call[field], 'isoformat'):
-                    call[field] = call[field].isoformat()
-                else:
-                    call[field] = str(call[field])
-        
-        # Calculate and format duration
-        if call.get("duration"):
-            duration_seconds = int(call["duration"])
-            minutes = duration_seconds // 60
-            seconds = duration_seconds % 60
-            call["duration_formatted"] = f"{minutes}m {seconds:02d}s"
-        else:
-            call["duration_formatted"] = "0m 00s"
-        
-        # Parse transcript with speaker labels
-        transcript_messages = []
-        if call.get("transcript"):
-            try:
-                tr = call["transcript"]
-                if isinstance(tr, str):
-                    tr = json.loads(tr)
-                if isinstance(tr, list):
-                    for msg in tr:
-                        if msg.get("type") == "message":
-                            speaker = "AI" if msg.get("role") == "assistant" else "User"
-                            text = " ".join(msg.get("content", [])) if isinstance(msg.get("content"), list) else str(msg.get("content"))
-                            transcript_messages.append({
-                                "speaker": speaker,
-                                "text": text
-                            })
-            except Exception as e:
-                logging.warning(f"Transcript parse error: {e}")
-        
-        call["transcript_messages"] = transcript_messages
-        call["has_transcript"] = bool(transcript_messages)
-        
-        # Add presigned URLs for recording and transcript
-        call = add_presigned_urls_to_call(call)
-        call["has_recording"] = bool(call.get("recording_blob"))
-        
-        # Get appointment details if exists
-        appointment = db.get_appointment_by_call_id(call_id)
-        call["appointment"] = appointment
-        call["has_appointment"] = bool(appointment)
-        
-        # Format caller information
-        caller_info = {
-            "name": call.get("summary") or "Unknown Caller",
-            "phone_number": call.get("caller_number") or "Unknown",
-            "email": None,  # Can be added if stored
-            "preferred_contact": "Phone"
-        }
-        call["caller_info"] = caller_info
-        
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "data": call
-            }
-        )
-    except Exception as e:
-        logging.error(f"Error fetching call details: {e}")
-        traceback.print_exc()
-        return error_response("Failed to fetch call details", 500)
-
-
 @router.post("/livekit-webhook")
 async def livekit_webhook(request: Request):
     """Handle LiveKit events for call lifecycle"""
@@ -1674,7 +1465,7 @@ async def livekit_webhook(request: Request):
             
             # Skip if already final
             if current_status in {"completed", "unanswered"}:
-                logging.info(f"ℹ️ Call {call_id} already finalized, skipping webhook processing")
+                logging.info(f" Call {call_id} already finalized, skipping webhook processing")
                 return JSONResponse({"message": "Already finalized"})
 
             answered = check_if_answered(events_log)
@@ -1693,7 +1484,7 @@ async def livekit_webhook(request: Request):
             db.update_call_history(call_id, updates)
             
             logging.info(
-                f"✅ Call {call_id} marked as {final_status}. "
+                f" Call {call_id} marked as {final_status}. "
                 f"Duration will be set by agent."
             )
             
@@ -1736,7 +1527,7 @@ async def get_agents_by_owner(
         # Get agents
         agents = db.get_agents_by_owner_name(user_id, owner_name.strip())
         
-        # 🔥 ADD PRESIGNED URLS
+        # ADD PRESIGNED URLS
         for agent in agents:
             add_presigned_urls_to_agent(agent)
         
@@ -1760,7 +1551,7 @@ async def get_agents_by_owner(
 async def book_appointment(request: Request):
     """
     API for LiveKit agent to book an appointment.
-    ✅ Sends confirmation emails to BOTH customer AND owner.
+    Sends confirmation emails to BOTH customer AND owner.
     """
     try:
         data = await request.json()
@@ -1800,7 +1591,7 @@ async def book_appointment(request: Request):
             organizer_email=owner_email or customer_email
         )
         
-        # 🔥 Send email to OWNER (using dedicated function)
+        # Send email to OWNER (using dedicated function)
         owner_email_sent = False
         if owner_email:
             owner_email_sent = await mail_obj.send_owner_appointment_notification(
@@ -1817,11 +1608,11 @@ async def book_appointment(request: Request):
             )
             
             logging.info(
-                f"📧 Appointment emails sent - "
+                f" Appointment emails sent - "
                 f"Customer: {customer_email_sent}, Owner: {owner_email_sent}"
             )
         else:
-            logging.warning(f"⚠️ No owner_email for agent {user_id}, skipping owner notification")
+            logging.warning(f" No owner_email for agent {user_id}, skipping owner notification")
         
         return JSONResponse({
             "success": True,
@@ -1978,12 +1769,12 @@ async def reset_password(request: ResetPasswordRequest):
 #                 error_msg = str(e)
 #                 if 'duplicate key' in error_msg.lower() or 'unique constraint' in error_msg.lower():
 #                     skipped_count += 1
-#                     logger.info(f"⏭️ [{idx}/{len(voices_data)}] Skipped (duplicate): {voice.get('voice_name')}")
+#                     logger.info(f" [{idx}/{len(voices_data)}] Skipped (duplicate): {voice.get('voice_name')}")
 #                 else:
-#                     logger.error(f"❌ [{idx}/{len(voices_data)}] Failed: {voice.get('voice_name')} - {e}")
+#                     logger.error(f" [{idx}/{len(voices_data)}] Failed: {voice.get('voice_name')} - {e}")
 #                     failed.append(f"{voice.get('voice_name', 'Unknown')}: {error_msg}")
         
-#         logger.info(f"✅ Migration complete!")
+#         logger.info(f" Migration complete!")
 #         logger.info(f"   Inserted: {inserted_count}")
 #         logger.info(f"   Skipped (duplicates): {skipped_count}")
 #         logger.info(f"   Failed: {len(failed)}")
@@ -2001,10 +1792,10 @@ async def reset_password(request: ResetPasswordRequest):
 #         })
         
 #     except json.JSONDecodeError as e:
-#         logger.error(f"❌ Invalid JSON: {e}")
+#         logger.error(f" Invalid JSON: {e}")
 #         return error_response(f"Invalid JSON file: {str(e)}", 400)
 #     except Exception as e:
-#         logger.error(f"❌ Migration error: {e}")
+#         logger.error(f" Migration error: {e}")
 #         traceback.print_exc()
 #         return error_response(f"Migration failed: {str(e)}", 500)
 
@@ -2058,7 +1849,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                     logger.info(f"🌐 Found language section: {lang_name.upper()} ({lang_code})")
 #                     break
             
-#             # 🔥 FIX: Match ANY "Name:" pattern (not just "First Name:", "Second Name:", etc.)
+#             # FIX: Match ANY "Name:" pattern (not just "First Name:", "Second Name:", etc.)
 #             if re.match(r'^(First\s+|Second\s+|Third\s+|Fourth\s+)?Name:\s*.+', line, re.IGNORECASE):
 #                 # Save previous voice if complete
 #                 if current_voice and all(k in current_voice for k in ['voice_name', 'gender', 'voice_id', 'audio_filename']):
@@ -2103,13 +1894,13 @@ async def reset_password(request: ResetPasswordRequest):
 #             logger.info(f"     Audio: {v['audio_filename']}")
         
 #         # ==================== STEP 2: SAVE AUDIO FILES TEMPORARILY ====================
-#         logger.info("💾 Step 2: Saving audio files to temp directory...")
+#         logger.info(" Step 2: Saving audio files to temp directory...")
 #         temp_dir = Path(tempfile.mkdtemp())
         
 #         audio_file_map = {}
 #         for audio_file in audio_files:
 #             if not audio_file.filename.endswith('.mp3'):
-#                 logger.warning(f"  ⚠️ Skipping non-MP3 file: {audio_file.filename}")
+#                 logger.warning(f"  Skipping non-MP3 file: {audio_file.filename}")
 #                 continue
             
 #             file_path = temp_dir / audio_file.filename
@@ -2126,10 +1917,10 @@ async def reset_password(request: ResetPasswordRequest):
             
 #             logger.info(f"  ✓ Saved: {audio_file.filename}")
         
-#         logger.info(f"✅ Saved {len(audio_files)} audio files")
+#         logger.info(f" Saved {len(audio_files)} audio files")
         
 #         # ==================== STEP 3: MATCH VOICES WITH AUDIO FILES ====================
-#         logger.info("🔗 Step 3: Matching voices with audio files...")
+#         logger.info(" Step 3: Matching voices with audio files...")
 #         matched_voices = []
         
 #         for voice in voices:
@@ -2140,7 +1931,7 @@ async def reset_password(request: ResetPasswordRequest):
 #             if expected_filename in audio_file_map:
 #                 voice['audio_path'] = audio_file_map[expected_filename]
 #                 matched_voices.append(voice)
-#                 logger.info(f"✅ Exact match: {voice['voice_name']} → {expected_filename}")
+#                 logger.info(f" Exact match: {voice['voice_name']} → {expected_filename}")
 #                 matched = True
 #                 continue
             
@@ -2149,7 +1940,7 @@ async def reset_password(request: ResetPasswordRequest):
 #             if exact_path.exists():
 #                 voice['audio_path'] = exact_path
 #                 matched_voices.append(voice)
-#                 logger.info(f"✅ File system match: {voice['voice_name']} → {expected_filename}")
+#                 logger.info(f" File system match: {voice['voice_name']} → {expected_filename}")
 #                 matched = True
 #                 continue
             
@@ -2160,7 +1951,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 voice['audio_path'] = audio_file_map[normalized_expected]
 #                 matched_voices.append(voice)
 #                 actual_name = audio_file_map[normalized_expected].name
-#                 logger.info(f"✅ Fuzzy match: {voice['voice_name']} → {actual_name}")
+#                 logger.info(f" Fuzzy match: {voice['voice_name']} → {actual_name}")
 #                 matched = True
 #                 continue
             
@@ -2171,21 +1962,21 @@ async def reset_password(request: ResetPasswordRequest):
 #                     if voice_id in filename.lower():
 #                         voice['audio_path'] = filepath
 #                         matched_voices.append(voice)
-#                         logger.info(f"✅ ID match: {voice['voice_name']} → {filepath.name}")
+#                         logger.info(f" ID match: {voice['voice_name']} → {filepath.name}")
 #                         matched = True
 #                         break
             
 #             if not matched:
-#                 logger.warning(f"⚠️ No audio file found for: {voice['voice_name']} (expected: {expected_filename})")
+#                 logger.warning(f" No audio file found for: {voice['voice_name']} (expected: {expected_filename})")
         
-#         logger.info(f"✅ Matched {len(matched_voices)}/{len(voices)} voices")
+#         logger.info(f" Matched {len(matched_voices)}/{len(voices)} voices")
         
 #         if not matched_voices:
 #             shutil.rmtree(temp_dir)
 #             return error_response("No audio files matched with document data", 400)
         
 #         # ==================== STEP 4: UPLOAD TO HETZNER ====================
-#         logger.info("☁️ Step 4: Uploading to Hetzner...")
+#         logger.info(" Step 4: Uploading to Hetzner...")
 #         s3_client = get_s3_client()
 #         bucket_name = HETZNER_BUCKET_NAME
         
@@ -2205,7 +1996,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 blob_path = f"voice_samples/{voice_id}.mp3"
                 
 #                 # Upload to Hetzner
-#                 logger.info(f"  📤 Uploading {voice['voice_name']} ({len(audio_content)} bytes)...")
+#                 logger.info(f"   Uploading {voice['voice_name']} ({len(audio_content)} bytes)...")
 #                 s3_client.put_object(
 #                     Bucket=bucket_name,
 #                     Key=blob_path,
@@ -2217,17 +2008,17 @@ async def reset_password(request: ResetPasswordRequest):
 #                 voice['audio_blob_path'] = blob_path
 #                 uploaded_voices.append(voice)
                 
-#                 logger.info(f"✅ Uploaded: {voice['voice_name']} → {blob_path}")
+#                 logger.info(f" Uploaded: {voice['voice_name']} → {blob_path}")
                 
 #             except Exception as e:
 #                 error_msg = f"Upload failed for {voice['voice_name']}: {str(e)}"
-#                 logger.error(f"❌ {error_msg}")
+#                 logger.error(f" {error_msg}")
 #                 upload_errors.append(error_msg)
 #                 import traceback
 #                 traceback.print_exc()
 #                 continue
         
-#         logger.info(f"✅ Uploaded {len(uploaded_voices)} files to Hetzner")
+#         logger.info(f" Uploaded {len(uploaded_voices)} files to Hetzner")
         
 #         if upload_errors:
 #             logger.error("Upload errors:")
@@ -2235,7 +2026,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 logger.error(f"  - {err}")
         
 #         # ==================== STEP 5: SAVE TO DATABASE ====================
-#         logger.info("💾 Step 5: Saving to database...")
+#         logger.info(" Step 5: Saving to database...")
 #         saved_count = 0
 #         failed = []
         
@@ -2251,21 +2042,21 @@ async def reset_password(request: ResetPasswordRequest):
 #                     'duration_seconds': None
 #                 })
 #                 saved_count += 1
-#                 logger.info(f"✅ Saved to DB: {voice['voice_name']}")
+#                 logger.info(f" Saved to DB: {voice['voice_name']}")
 #             except Exception as e:
-#                 logger.error(f"❌ DB save failed for {voice['voice_name']}: {e}")
+#                 logger.error(f" DB save failed for {voice['voice_name']}: {e}")
 #                 failed.append(voice['voice_name'])
 #                 import traceback
 #                 traceback.print_exc()
         
 #         # ==================== CLEANUP ====================
 #         shutil.rmtree(temp_dir)
-#         logger.info("🧹 Cleaned up temp files")
+#         logger.info(" Cleaned up temp files")
         
 #         # ==================== RESPONSE ====================
 #         return JSONResponse({
 #             "success": True,
-#             "message": f"✅ Successfully uploaded {saved_count} voice samples!",
+#             "message": f" Successfully uploaded {saved_count} voice samples!",
 #             "summary": {
 #                 "parsed_from_document": len(voices),
 #                 "matched_with_audio": len(matched_voices),
@@ -2288,56 +2079,11 @@ async def reset_password(request: ResetPasswordRequest):
 #         })
         
 #     except Exception as e:
-#         logger.error(f"❌ Bulk upload error: {e}")
+#         logger.error(f" Bulk upload error: {e}")
 #         import traceback
 #         traceback.print_exc()
 #         return error_response(f"Upload failed: {str(e)}", 500)
 
-@router.get("/voice-samples")
-async def get_voice_samples(language: Optional[str] = Query(None)):
-    """
-    PUBLIC endpoint - Get all voice samples with presigned URLs
-    No authentication required
-    """
-    try:
-        # Get samples from database
-        if language:
-            samples = db.get_voice_samples_by_language(language)
-        else:
-            samples = db.get_all_voice_samples()
-        
-        # Add presigned URLs (valid for 24 hours)
-        for sample in samples:
-            if sample.get("audio_blob_path"):
-                sample["audio_url"] = generate_presigned_url(
-                    sample["audio_blob_path"],
-                    expiration=86400  # 24 hours
-                )
-            
-            # Format timestamp
-            if sample.get("created_at"):
-                sample["created_at"] = sample["created_at"].isoformat()
-        
-        # Group by language for easier frontend consumption
-        grouped = {}
-        for sample in samples:
-            lang = sample["language"]
-            if lang not in grouped:
-                grouped[lang] = []
-            grouped[lang].append(sample)
-        
-        return JSONResponse({
-            "success": True,
-            "total": len(samples),
-            "grouped_by_language": grouped,
-            "all_samples": samples
-        })
-        
-    except Exception as e:
-        logging.error(f"Error fetching voice samples: {e}")
-        traceback.print_exc()
-        return error_response("Failed to fetch voice samples", 500)
-    
 
 @router.post("/agents/{agent_id}/reset-minutes")
 async def reset_agent_minutes(
@@ -2363,7 +2109,7 @@ async def reset_agent_minutes(
         db.reset_agent_minutes(agent_id, user_id)
         
         logging.info(
-            f"✅ Agent {agent_id} minutes reset by admin {user_id}. "
+            f" Agent {agent_id} minutes reset by admin {user_id}. "
             f"Was: {old_used}/{allowed} min, Now: 0/{allowed} min"
         )
         
@@ -2417,7 +2163,7 @@ async def submit_contact_form(request: ContactFormRequest):
             logging.error(f"Failed to send contact form email from {request.email}")
             return error_response("Failed to send message. Please try again.", 500)
         
-        logging.info(f"✅ Contact form submitted by {request.first_name} {request.last_name} ({request.email})")
+        logging.info(f" Contact form submitted by {request.first_name} {request.last_name} ({request.email})")
         
         return JSONResponse({
             "success": True,
