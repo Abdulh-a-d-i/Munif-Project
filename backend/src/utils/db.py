@@ -1788,7 +1788,7 @@ class PGDB:
                     'language', 'industry', 'phone_number', 
                     'owner_name', 'owner_email', 'avatar_url',
                     'business_hours_start', 'business_hours_end', 
-                    'allowed_minutes', 'user_id'  # Can update user assignment
+                    'allowed_minutes', 'user_id'  
                 }
                 
                 for key, value in updates.items():
@@ -1942,11 +1942,6 @@ class PGDB:
                 raise
         
 
-
-
-
-
-        
 
     # ==================== APPOINTMENTS TABLE ====================
     def create_appointments_table(self):

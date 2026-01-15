@@ -461,285 +461,285 @@ async def get_plan_usage(current_user: dict = Depends(get_current_user)):
 #         traceback.print_exc()
 #         return error_response("Failed to toggle agent status", 500)
 
-@router.get("/dashboard/recent-actions")
-async def get_recent_actions(
-    current_user: dict = Depends(get_current_user),
-    limit: int = 10
-):
-    """
-    Get recent actions/activity log for user's dashboard.
-    Returns recent events like:
-    - Appointments booked
-    - Calls handled
-    - Missed calls
-    - Agent configuration updates
-    """
-    try:
-        user_id = current_user["id"]
-        is_admin = current_user.get("is_admin", False)
+# @router.get("/dashboard/recent-actions")
+# async def get_recent_actions(
+#     current_user: dict = Depends(get_current_user),
+#     limit: int = 10
+# ):
+#     """
+#     Get recent actions/activity log for user's dashboard.
+#     Returns recent events like:
+#     - Appointments booked
+#     - Calls handled
+#     - Missed calls
+#     - Agent configuration updates
+#     """
+#     try:
+#         user_id = current_user["id"]
+#         is_admin = current_user.get("is_admin", False)
         
-        # Get user's agents based on role
-        if is_admin:
-            agents = db.get_agents_by_admin(user_id)
-        else:
-            agents = db.get_agents_for_user(user_id)
+#         # Get user's agents based on role
+#         if is_admin:
+#             agents = db.get_agents_by_admin(user_id)
+#         else:
+#             agents = db.get_agents_for_user(user_id)
         
-        agent_id = None
-        if agents and len(agents) > 0:
-            agent_id = agents[0]["id"]
+#         agent_id = None
+#         if agents and len(agents) > 0:
+#             agent_id = agents[0]["id"]
         
-        actions = []
+#         actions = []
         
-        # Try to get real call history if agent exists
-        if agent_id:
-            call_history = db.get_call_history_by_agent(agent_id, page=1, page_size=limit)
+#         # Try to get real call history if agent exists
+#         if agent_id:
+#             call_history = db.get_call_history_by_agent(agent_id, page=1, page_size=limit)
             
-            for call in call_history.get("calls", []):
-                action_type = "call"
-                icon = "phone"
+#             for call in call_history.get("calls", []):
+#                 action_type = "call"
+#                 icon = "phone"
                 
-                # Determine action description based on call status
-                if call.get("status") == "completed":
-                    description = f"AI successfully handled call regarding \"{call.get('summary', 'inquiry')}\"."
-                    icon = "phone"
-                elif call.get("status") in ["unanswered", "failed"]:
-                    caller = call.get("caller_number", "unknown number")
-                    description = f"Missed call from {caller} (Caller hung up)."
-                    icon = "warning"
-                else:
-                    description = f"AI transferred call to 'Support Team' queue."
-                    icon = "phone"
+#                 # Determine action description based on call status
+#                 if call.get("status") == "completed":
+#                     description = f"AI successfully handled call regarding \"{call.get('summary', 'inquiry')}\"."
+#                     icon = "phone"
+#                 elif call.get("status") in ["unanswered", "failed"]:
+#                     caller = call.get("caller_number", "unknown number")
+#                     description = f"Missed call from {caller} (Caller hung up)."
+#                     icon = "warning"
+#                 else:
+#                     description = f"AI transferred call to 'Support Team' queue."
+#                     icon = "phone"
                 
-                # Calculate time ago
-                created_at = call.get("created_at")
-                time_ago = "Just now"
-                if created_at:
-                    from datetime import datetime, timezone
-                    now = datetime.now(timezone.utc)
-                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
-                        created_at = created_at.replace(tzinfo=timezone.utc)
+#                 # Calculate time ago
+#                 created_at = call.get("created_at")
+#                 time_ago = "Just now"
+#                 if created_at:
+#                     from datetime import datetime, timezone
+#                     now = datetime.now(timezone.utc)
+#                     if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
+#                         created_at = created_at.replace(tzinfo=timezone.utc)
                     
-                    diff = now - created_at
-                    minutes = int(diff.total_seconds() / 60)
-                    hours = int(minutes / 60)
+#                     diff = now - created_at
+#                     minutes = int(diff.total_seconds() / 60)
+#                     hours = int(minutes / 60)
                     
-                    if minutes < 1:
-                        time_ago = "Just now"
-                    elif minutes < 60:
-                        time_ago = f"{minutes}m ago"
-                    elif hours < 24:
-                        time_ago = f"{hours}h ago"
-                    else:
-                        days = int(hours / 24)
-                        time_ago = f"{days}d ago"
+#                     if minutes < 1:
+#                         time_ago = "Just now"
+#                     elif minutes < 60:
+#                         time_ago = f"{minutes}m ago"
+#                     elif hours < 24:
+#                         time_ago = f"{hours}h ago"
+#                     else:
+#                         days = int(hours / 24)
+#                         time_ago = f"{days}d ago"
                 
-                actions.append({
-                    "type": action_type,
-                    "icon": icon,
-                    "description": description,
-                    "time_ago": time_ago,
-                    "timestamp": created_at.isoformat() if created_at else None
-                })
+#                 actions.append({
+#                     "type": action_type,
+#                     "icon": icon,
+#                     "description": description,
+#                     "time_ago": time_ago,
+#                     "timestamp": created_at.isoformat() if created_at else None
+#                 })
         
-        # If no real actions, return demo data
-        if len(actions) == 0:
-            demo_actions = [
-                {
-                    "type": "call",
-                    "icon": "phone",
-                    "description": "AI successfully handled call regarding \"appointment scheduling\".",
-                    "time_ago": "5m ago",
-                    "timestamp": None
-                },
-                {
-                    "type": "appointment",
-                    "icon": "calendar",
-                    "description": "New appointment booked: John Smith - Consultation (Tomorrow 10:00 AM).",
-                    "time_ago": "15m ago",
-                    "timestamp": None
-                },
-                {
-                    "type": "call",
-                    "icon": "warning",
-                    "description": "Missed call from +1 (555) 123-4567 (Caller hung up).",
-                    "time_ago": "32m ago",
-                    "timestamp": None
-                },
-                {
-                    "type": "call",
-                    "icon": "phone",
-                    "description": "AI successfully handled call regarding \"pricing inquiry\".",
-                    "time_ago": "1h ago",
-                    "timestamp": None
-                },
-                {
-                    "type": "config",
-                    "icon": "settings",
-                    "description": "AI agent configuration updated by Admin.",
-                    "time_ago": "2h ago",
-                    "timestamp": None
-                },
-                {
-                    "type": "call",
-                    "icon": "phone",
-                    "description": "AI transferred call to 'Support Team' queue.",
-                    "time_ago": "3h ago",
-                    "timestamp": None
-                },
-                {
-                    "type": "appointment",
-                    "icon": "calendar",
-                    "description": "Appointment rescheduled: Sarah Johnson - Follow-up (Next Monday 2:00 PM).",
-                    "time_ago": "4h ago",
-                    "timestamp": None
-                },
-                {
-                    "type": "call",
-                    "icon": "phone",
-                    "description": "AI successfully handled call regarding \"service availability\".",
-                    "time_ago": "5h ago",
-                    "timestamp": None
-                }
-            ]
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "success": True,
-                    "actions": demo_actions[:limit],
-                    "is_demo": True
-                }
-            )
+#         # If no real actions, return demo data
+#         if len(actions) == 0:
+#             demo_actions = [
+#                 {
+#                     "type": "call",
+#                     "icon": "phone",
+#                     "description": "AI successfully handled call regarding \"appointment scheduling\".",
+#                     "time_ago": "5m ago",
+#                     "timestamp": None
+#                 },
+#                 {
+#                     "type": "appointment",
+#                     "icon": "calendar",
+#                     "description": "New appointment booked: John Smith - Consultation (Tomorrow 10:00 AM).",
+#                     "time_ago": "15m ago",
+#                     "timestamp": None
+#                 },
+#                 {
+#                     "type": "call",
+#                     "icon": "warning",
+#                     "description": "Missed call from +1 (555) 123-4567 (Caller hung up).",
+#                     "time_ago": "32m ago",
+#                     "timestamp": None
+#                 },
+#                 {
+#                     "type": "call",
+#                     "icon": "phone",
+#                     "description": "AI successfully handled call regarding \"pricing inquiry\".",
+#                     "time_ago": "1h ago",
+#                     "timestamp": None
+#                 },
+#                 {
+#                     "type": "config",
+#                     "icon": "settings",
+#                     "description": "AI agent configuration updated by Admin.",
+#                     "time_ago": "2h ago",
+#                     "timestamp": None
+#                 },
+#                 {
+#                     "type": "call",
+#                     "icon": "phone",
+#                     "description": "AI transferred call to 'Support Team' queue.",
+#                     "time_ago": "3h ago",
+#                     "timestamp": None
+#                 },
+#                 {
+#                     "type": "appointment",
+#                     "icon": "calendar",
+#                     "description": "Appointment rescheduled: Sarah Johnson - Follow-up (Next Monday 2:00 PM).",
+#                     "time_ago": "4h ago",
+#                     "timestamp": None
+#                 },
+#                 {
+#                     "type": "call",
+#                     "icon": "phone",
+#                     "description": "AI successfully handled call regarding \"service availability\".",
+#                     "time_ago": "5h ago",
+#                     "timestamp": None
+#                 }
+#             ]
+#             return JSONResponse(
+#                 status_code=200,
+#                 content={
+#                     "success": True,
+#                     "actions": demo_actions[:limit],
+#                     "is_demo": True
+#                 }
+#             )
         
-        # Add agent configuration update placeholder if we have real actions
-        if len(actions) > 2:
-            actions.insert(2, {
-                "type": "config",
-                "icon": "settings",
-                "description": "AI agent configuration updated by Admin.",
-                "time_ago": "2h ago",
-                "timestamp": None
-            })
+#         # Add agent configuration update placeholder if we have real actions
+#         if len(actions) > 2:
+#             actions.insert(2, {
+#                 "type": "config",
+#                 "icon": "settings",
+#                 "description": "AI agent configuration updated by Admin.",
+#                 "time_ago": "2h ago",
+#                 "timestamp": None
+#             })
         
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "actions": actions[:limit]
-            }
-        )
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "actions": actions[:limit]
+#             }
+#         )
         
-    except Exception as e:
-        logging.error(f"Error fetching recent actions: {e}")
-        traceback.print_exc()
-        return error_response("Failed to fetch recent actions", 500)
+#     except Exception as e:
+#         logging.error(f"Error fetching recent actions: {e}")
+#         traceback.print_exc()
+#         return error_response("Failed to fetch recent actions", 500)
 
 
-@router.get("/user/my-agent")
-async def get_user_agent(
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Get agent assigned to the current user with role-based field filtering.
+# @router.get("/user/my-agent")
+# async def get_user_agent(
+#     current_user: dict = Depends(get_current_user)
+# ):
+#     """
+#     Get agent assigned to the current user with role-based field filtering.
     
-    Role-Based Response:
-    - ADMIN: Returns all fields
-    - USER: Returns all fields EXCEPT business_hours_start, business_hours_end, allowed_minutes.
-            phone_number is included but marked as read_only.
-    """
-    try:
-        user_id = current_user["id"]
-        is_admin = current_user.get("is_admin", False)
+#     Role-Based Response:
+#     - ADMIN: Returns all fields
+#     - USER: Returns all fields EXCEPT business_hours_start, business_hours_end, allowed_minutes.
+#             phone_number is included but marked as read_only.
+#     """
+#     try:
+#         user_id = current_user["id"]
+#         is_admin = current_user.get("is_admin", False)
         
-        # Get agents based on role
-        if is_admin:
-            # Admin sees agents they created
-            agents = db.get_agents_by_admin(user_id)
-        else:
-            # User sees agents assigned to them
-            agents = db.get_agents_for_user(user_id) if hasattr(db, 'get_agents_for_user') else []
+#         # Get agents based on role
+#         if is_admin:
+#             # Admin sees agents they created
+#             agents = db.get_agents_by_admin(user_id)
+#         else:
+#             # User sees agents assigned to them
+#             agents = db.get_agents_for_user(user_id) if hasattr(db, 'get_agents_for_user') else []
             
-            # Fallback: Check if any agents have this user_id
-            if not agents:
-                all_agents = db.get_agents_by_admin(user_id)
-                agents = [a for a in all_agents if a.get("user_id") == user_id]
+#             # Fallback: Check if any agents have this user_id
+#             if not agents:
+#                 all_agents = db.get_agents_by_admin(user_id)
+#                 agents = [a for a in all_agents if a.get("user_id") == user_id]
         
-        if not agents or len(agents) == 0:
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "success": True,
-                    "data": None,
-                    "message": "No agent assigned"
-                }
-            )
+#         if not agents or len(agents) == 0:
+#             return JSONResponse(
+#                 status_code=200,
+#                 content={
+#                     "success": True,
+#                     "data": None,
+#                     "message": "No agent assigned"
+#                 }
+#             )
         
-        agent = agents[0]  # Primary agent
+#         agent = agents[0]  # Primary agent
         
-        # Build response based on role
-        if is_admin:
-            # Admin gets all fields
-            agent_data = {
-                "id": agent.get("id"),
-                "agent_name": agent.get("agent_name"),
-                "phone_number": agent.get("phone_number"),
-                "system_prompt": agent.get("system_prompt"),
-                "voice_type": agent.get("voice_type"),
-                "language": agent.get("language"),
-                "industry": agent.get("industry"),
-                "owner_name": agent.get("owner_name"),
-                "owner_email": agent.get("owner_email"),
-                "avatar_url": agent.get("avatar_url"),
-                "is_active": agent.get("is_active", False),
-                "business_hours_start": str(agent.get("business_hours_start", "")) if agent.get("business_hours_start") else None,
-                "business_hours_end": str(agent.get("business_hours_end", "")) if agent.get("business_hours_end") else None,
-                "allowed_minutes": agent.get("allowed_minutes", 0),
-                "used_minutes": agent.get("used_minutes", 0),
-                "user_id": agent.get("user_id"),
-                "can_edit_all_fields": True
-            }
-        else:
-            # User gets limited fields - NO business_hours, NO allowed_minutes
-            # phone_number is visible but read_only
-            agent_data = {
-                "id": agent.get("id"),
-                "agent_name": agent.get("agent_name"),
-                "phone_number": agent.get("phone_number"),  # Visible but read-only
-                "phone_number_read_only": True,  # Flag to indicate read-only
-                "system_prompt": agent.get("system_prompt"),
-                "voice_type": agent.get("voice_type"),
-                "language": agent.get("language"),
-                "industry": agent.get("industry"),
-                "owner_name": agent.get("owner_name"),
-                "owner_email": agent.get("owner_email"),
-                "avatar_url": agent.get("avatar_url"),
-                "is_active": agent.get("is_active", False),
-                # Note: business_hours and allowed_minutes are NOT included for regular users
-                "can_edit_all_fields": False,
-                "editable_fields": [
-                    "agent_name",
-                    "system_prompt", 
-                    "voice_type",
-                    "language",
-                    "industry",
-                    "owner_name",
-                    "owner_email",
-                    "avatar"
-                ]
-            }
+#         # Build response based on role
+#         if is_admin:
+#             # Admin gets all fields
+#             agent_data = {
+#                 "id": agent.get("id"),
+#                 "agent_name": agent.get("agent_name"),
+#                 "phone_number": agent.get("phone_number"),
+#                 "system_prompt": agent.get("system_prompt"),
+#                 "voice_type": agent.get("voice_type"),
+#                 "language": agent.get("language"),
+#                 "industry": agent.get("industry"),
+#                 "owner_name": agent.get("owner_name"),
+#                 "owner_email": agent.get("owner_email"),
+#                 "avatar_url": agent.get("avatar_url"),
+#                 "is_active": agent.get("is_active", False),
+#                 "business_hours_start": str(agent.get("business_hours_start", "")) if agent.get("business_hours_start") else None,
+#                 "business_hours_end": str(agent.get("business_hours_end", "")) if agent.get("business_hours_end") else None,
+#                 "allowed_minutes": agent.get("allowed_minutes", 0),
+#                 "used_minutes": agent.get("used_minutes", 0),
+#                 "user_id": agent.get("user_id"),
+#                 "can_edit_all_fields": True
+#             }
+#         else:
+#             # User gets limited fields - NO business_hours, NO allowed_minutes
+#             # phone_number is visible but read_only
+#             agent_data = {
+#                 "id": agent.get("id"),
+#                 "agent_name": agent.get("agent_name"),
+#                 "phone_number": agent.get("phone_number"),  # Visible but read-only
+#                 "phone_number_read_only": True,  # Flag to indicate read-only
+#                 "system_prompt": agent.get("system_prompt"),
+#                 "voice_type": agent.get("voice_type"),
+#                 "language": agent.get("language"),
+#                 "industry": agent.get("industry"),
+#                 "owner_name": agent.get("owner_name"),
+#                 "owner_email": agent.get("owner_email"),
+#                 "avatar_url": agent.get("avatar_url"),
+#                 "is_active": agent.get("is_active", False),
+#                 # Note: business_hours and allowed_minutes are NOT included for regular users
+#                 "can_edit_all_fields": False,
+#                 "editable_fields": [
+#                     "agent_name",
+#                     "system_prompt", 
+#                     "voice_type",
+#                     "language",
+#                     "industry",
+#                     "owner_name",
+#                     "owner_email",
+#                     "avatar"
+#                 ]
+#             }
         
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "data": agent_data,
-                "is_admin": is_admin
-            }
-        )
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "data": agent_data,
+#                 "is_admin": is_admin
+#             }
+#         )
         
-    except Exception as e:
-        logging.error(f"Error fetching user agent: {e}")
-        traceback.print_exc()
-        return error_response("Failed to fetch agent details", 500)
+#     except Exception as e:
+#         logging.error(f"Error fetching user agent: {e}")
+#         traceback.print_exc()
+#         return error_response("Failed to fetch agent details", 500)
 
 
 @router.put("/user/my-agent")

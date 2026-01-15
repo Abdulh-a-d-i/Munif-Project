@@ -109,50 +109,50 @@ def add_presigned_urls_to_call(call: dict) -> dict:
     return call
 
 # ==================== ADMIN USER MANAGEMENT ====================
-# @router.get("/admin/users")
-# async def get_all_users_admin(
-#     page: int = Query(1, ge=1),
-#     page_size: int = Query(20, ge=1, le=100),
-#     search: str = Query(None),
-#     current_user: dict = Depends(require_admin)
-# ):
-#     """
-#     Get paginated list of all users (admin only).
-#     Supports search by username or email.
-    
-#     Requires: Admin authentication
-#     """
-#     try:
-#         result = db.get_all_users(page=page, page_size=page_size, search=search)
-        
-#         # Format created_at timestamps
-#         for user in result.get("users", []):
-#             if user.get("created_at"):
-#                 user["created_at"] = user["created_at"].isoformat() if hasattr(user["created_at"], 'isoformat') else str(user["created_at"])
-        
-#         return JSONResponse(
-#             status_code=200,
-#             content={
-#                 "success": True,
-#                 "data": result
-#             }
-#         )
-        
-#     except Exception as e:
-#         logging.error(f"Error fetching users: {str(e)}")
-#         traceback.print_exc()
-#         return error_response(f"Failed to fetch users: {str(e)}", status_code=500)
-
-
-@router.get("/users/list")
-async def get_users_list(current_user: dict = Depends(require_admin)):
+@router.get("/admin/users")
+async def get_all_users_admin(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: str = Query(None),
+    current_user: dict = Depends(require_admin)
+):
     """
-    Get simplified list of all users for dropdowns (admin only).
-    Returns only id, username, and email for each user.
+    Get paginated list of all users (admin only).
+    Supports search by username or email.
     
     Requires: Admin authentication
     """
     try:
+        result = db.get_all_users(page=page, page_size=page_size, search=search)
+        
+        # Format created_at timestamps
+        for user in result.get("users", []):
+            if user.get("created_at"):
+                user["created_at"] = user["created_at"].isoformat() if hasattr(user["created_at"], 'isoformat') else str(user["created_at"])
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "data": result
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f"Error fetching users: {str(e)}")
+        traceback.print_exc()
+        return error_response(f"Failed to fetch users: {str(e)}", status_code=500)
+
+
+@router.get("/users/list")
+
+async def get_users_list(current_user: dict = Depends(get_current_user)):
+    """
+    Get simplified list of all users for dropdowns.
+    Available to all authenticated users.
+    """
+    try:
+        # Use the existing DB method
         users = db.get_all_users_simple()
         
         return JSONResponse(
@@ -585,13 +585,14 @@ async def get_agent_call_history(
     agent_id: int,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, le=100),
-    user=Depends(get_current_user)
+    user=Depends(get_current_user)  # Any authenticated user can now enter
 ):
-    """Get call history for a specific agent"""
+    """Get call history for a specific agent (Global Authenticated Access)"""
     try:
         agent = db.get_agent_by_id(agent_id)
-        if not agent or agent["admin_id"] != user["id"]:
-            raise HTTPException(status_code=403, detail="Access denied")
+        
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
         
         history = db.get_call_history_by_agent(agent_id, page, page_size)
         
@@ -602,7 +603,10 @@ async def get_agent_call_history(
             # Format timestamps
             for field in ["created_at", "started_at", "ended_at"]:
                 if call.get(field):
-                    call_data[field] = call[field].isoformat()
+                    if isinstance(call[field], datetime):
+                        call_data[field] = call[field].isoformat()
+                    else:
+                        call_data[field] = str(call[field])
             
             # Calculate duration if missing
             if not call_data.get("duration") and call.get("started_at") and call.get("ended_at"):
@@ -613,7 +617,7 @@ async def get_agent_call_history(
                 except:
                     call_data["duration"] = 0
             
-            # Parse transcript
+            # Parse transcript logic remains the same
             transcript_text = None
             if call.get("transcript"):
                 try:
@@ -625,7 +629,8 @@ async def get_agent_call_history(
                         for msg in tr:
                             if msg.get("type") == "message":
                                 speaker = "Assistant" if msg.get("role") == "assistant" else "User"
-                                text = " ".join(msg.get("content", [])) if isinstance(msg.get("content"), list) else str(msg.get("content"))
+                                content = msg.get("content", "")
+                                text = " ".join(content) if isinstance(content, list) else str(content)
                                 lines.append(f"{speaker}: {text}")
                         transcript_text = "\n".join(lines)
                 except Exception as e:
@@ -634,7 +639,7 @@ async def get_agent_call_history(
             call_data["transcript_text"] = transcript_text
             call_data["has_recording"] = bool(call.get("recording_blob"))
             
-            # ADD PRESIGNED URLS
+            # Presigned URLs for recordings/assets
             call_data = add_presigned_urls_to_call(call_data)
             
             calls.append(call_data)
@@ -642,14 +647,14 @@ async def get_agent_call_history(
         return JSONResponse(content=jsonable_encoder({
             "success": True,
             "agent_id": agent_id,
-            "agent_name": agent["agent_name"],
-            "phone_number": agent["phone_number"],
+            "agent_name": agent.get("agent_name"),
+            "phone_number": agent.get("phone_number"),
             "pagination": {
-                "page": history["page"],
-                "page_size": history["page_size"],
-                "total": history["total"],
-                "completed_calls": history["completed_calls"],
-                "not_completed_calls": history["not_completed_calls"]
+                "page": history.get("page", 1),
+                "page_size": history.get("page_size", 10),
+                "total": history.get("total", 0),
+                "completed_calls": history.get("completed_calls", 0),
+                "not_completed_calls": history.get("not_completed_calls", 0)
             },
             "calls": calls
         }))
