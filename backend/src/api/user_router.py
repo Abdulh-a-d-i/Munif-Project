@@ -346,11 +346,14 @@ async def get_dashboard_overview(current_user: dict = Depends(get_current_user))
         traceback.print_exc()
         return error_response("Failed to fetch dashboard data", 500)
 
-@router.post("/dashboard/toggle-agent")
-async def toggle_agent_status(current_user: dict = Depends(get_current_user)):
+@router.get("/dashboard/plan-usage")
+async def get_plan_usage(current_user: dict = Depends(get_current_user)):
     """
-    Toggle agent ON/OFF status.
-    Toggles the is_active status of the user's primary agent.
+    Get plan usage information for the user.
+    Returns:
+    - Used minutes
+    - Total allowed minutes
+    - Usage percentage
     """
     try:
         user_id = current_user["id"]
@@ -363,41 +366,100 @@ async def toggle_agent_status(current_user: dict = Depends(get_current_user)):
             agents = db.get_agents_for_user(user_id)
         
         if not agents or len(agents) == 0:
-            return error_response("No agent configured", 404)
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "success": True,
+                    "data": {
+                        "used_minutes": 0,
+                        "total_minutes": 0,
+                        "percentage": 0
+                    }
+                }
+            )
         
-        # Toggle first agent (primary agent)
+        # Get first agent (primary agent)
         primary_agent = agents[0]
-        agent_id = primary_agent["id"]
-        current_status = primary_agent.get("is_active", False)
-        new_status = not current_status
         
-        # Check if enabling agent: Validate available minutes
-        if new_status:
-            minutes_check = db.check_agent_minutes_available(agent_id)
-            if not minutes_check["available"]:
-                used = minutes_check["used_minutes"]
-                allowed = minutes_check["allowed_minutes"]
-                return error_response(
-                    f"Insufficient minutes. Used: {used:.1f} / {allowed}. Please upgrade plan.",
-                    status_code=400
-                )
+        # Get plan usage
+        allowed_minutes = primary_agent.get("allowed_minutes", 0)
+        used_minutes = primary_agent.get("used_minutes", 0)
         
-        # Update agent status
-        db.toggle_agent_status_for_user(user_id, agent_id, new_status)
+        percentage = 0
+        if allowed_minutes > 0:
+            percentage = int((used_minutes / allowed_minutes) * 100)
+        
+        plan_usage = {
+            "used_minutes": int(used_minutes),
+            "total_minutes": int(allowed_minutes),
+            "percentage": percentage
+        }
         
         return JSONResponse(
             status_code=200,
             content={
                 "success": True,
-                "message": f"Agent turned {'ON' if new_status else 'OFF'}",
-                "is_active": new_status
+                "data": plan_usage
             }
         )
         
     except Exception as e:
-        logging.error(f"Error toggling agent status: {e}")
+        logging.error(f"Error fetching plan usage: {e}")
         traceback.print_exc()
-        return error_response("Failed to toggle agent status", 500)
+        return error_response("Failed to fetch plan usage data", 500)
+
+# @router.post("/dashboard/toggle-agent")
+# async def toggle_agent_status(current_user: dict = Depends(get_current_user)):
+#     """
+#     Toggle agent ON/OFF status.
+#     Toggles the is_active status of the user's primary agent.
+#     """
+#     try:
+#         user_id = current_user["id"]
+#         is_admin = current_user.get("is_admin", False)
+        
+#         # Get user's agents based on role
+#         if is_admin:
+#             agents = db.get_agents_by_admin(user_id)
+#         else:
+#             agents = db.get_agents_for_user(user_id)
+        
+#         if not agents or len(agents) == 0:
+#             return error_response("No agent configured", 404)
+        
+#         # Toggle first agent (primary agent)
+#         primary_agent = agents[0]
+#         agent_id = primary_agent["id"]
+#         current_status = primary_agent.get("is_active", False)
+#         new_status = not current_status
+        
+#         # Check if enabling agent: Validate available minutes
+#         if new_status:
+#             minutes_check = db.check_agent_minutes_available(agent_id)
+#             if not minutes_check["available"]:
+#                 used = minutes_check["used_minutes"]
+#                 allowed = minutes_check["allowed_minutes"]
+#                 return error_response(
+#                     f"Insufficient minutes. Used: {used:.1f} / {allowed}. Please upgrade plan.",
+#                     status_code=400
+#                 )
+        
+#         # Update agent status
+#         db.toggle_agent_status_for_user(user_id, agent_id, new_status)
+        
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "message": f"Agent turned {'ON' if new_status else 'OFF'}",
+#                 "is_active": new_status
+#             }
+#         )
+        
+#     except Exception as e:
+#         logging.error(f"Error toggling agent status: {e}")
+#         traceback.print_exc()
+#         return error_response("Failed to toggle agent status", 500)
 
 @router.get("/dashboard/recent-actions")
 async def get_recent_actions(

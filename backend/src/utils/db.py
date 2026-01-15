@@ -772,60 +772,60 @@ class PGDB:
 
 
 
-    def toggle_agent_status_admin(self, admin_id: int, agent_id: int, is_active: bool):
-        """
-        Admin-only global agent activation toggle.
+    # def toggle_agent_status_admin(self, admin_id: int, agent_id: int, is_active: bool):
+    #     """
+    #     Admin-only global agent activation toggle.
 
-        Rules:
-        - Only the admin who created the agent can toggle it
-        - Updates agents.is_active directly
-        """
-        with self.get_connection_context() as conn:
-            try:
-                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    # 🔍 Verify agent exists and belongs to admin
-                    cursor.execute("""
-                        SELECT id, admin_id, is_active
-                        FROM agents
-                        WHERE id = %s
-                    """, (agent_id,))
+    #     Rules:
+    #     - Only the admin who created the agent can toggle it
+    #     - Updates agents.is_active directly
+    #     """
+    #     with self.get_connection_context() as conn:
+    #         try:
+    #             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+    #                 # 🔍 Verify agent exists and belongs to admin
+    #                 cursor.execute("""
+    #                     SELECT id, admin_id, is_active
+    #                     FROM agents
+    #                     WHERE id = %s
+    #                 """, (agent_id,))
 
-                    agent = cursor.fetchone()
-                    if not agent:
-                        raise ValueError("Agent not found")
+    #                 agent = cursor.fetchone()
+    #                 if not agent:
+    #                     raise ValueError("Agent not found")
 
-                    if agent["admin_id"] != admin_id:
-                        raise ValueError("Access denied: You do not own this agent")
+    #                 if agent["admin_id"] != admin_id:
+    #                     raise ValueError("Access denied: You do not own this agent")
 
-                    # 🔄 Update global status
-                    cursor.execute("""
-                        UPDATE agents
-                        SET is_active = %s,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                        RETURNING id, is_active;
-                    """, (is_active, agent_id))
+    #                 # 🔄 Update global status
+    #                 cursor.execute("""
+    #                     UPDATE agents
+    #                     SET is_active = %s,
+    #                         updated_at = CURRENT_TIMESTAMP
+    #                     WHERE id = %s
+    #                     RETURNING id, is_active;
+    #                 """, (is_active, agent_id))
 
-                    result = cursor.fetchone()
-                    conn.commit()
+    #                 result = cursor.fetchone()
+    #                 conn.commit()
 
-                    logging.info(
-                        f"Admin {admin_id} set Agent {agent_id} "
-                        f"to {'active' if is_active else 'inactive'}"
-                    )
+    #                 logging.info(
+    #                     f"Admin {admin_id} set Agent {agent_id} "
+    #                     f"to {'active' if is_active else 'inactive'}"
+    #                 )
 
-                    return {
-                        "agent_id": result["id"],
-                        "is_active": result["is_active"]
-                    }
+    #                 return {
+    #                     "agent_id": result["id"],
+    #                     "is_active": result["is_active"]
+    #                 }
 
-            except ValueError:
-                conn.rollback()
-                raise
-            except Exception as e:
-                conn.rollback()
-                logging.error(f"Error toggling agent status: {e}")
-                raise
+    #         except ValueError:
+    #             conn.rollback()
+    #             raise
+    #         except Exception as e:
+    #             conn.rollback()
+    #             logging.error(f"Error toggling agent status: {e}")
+    #             raise
 
 
 

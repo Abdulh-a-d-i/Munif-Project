@@ -109,39 +109,39 @@ def add_presigned_urls_to_call(call: dict) -> dict:
     return call
 
 # ==================== ADMIN USER MANAGEMENT ====================
-@router.get("/admin/users")
-async def get_all_users_admin(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    search: str = Query(None),
-    current_user: dict = Depends(require_admin)
-):
-    """
-    Get paginated list of all users (admin only).
-    Supports search by username or email.
+# @router.get("/admin/users")
+# async def get_all_users_admin(
+#     page: int = Query(1, ge=1),
+#     page_size: int = Query(20, ge=1, le=100),
+#     search: str = Query(None),
+#     current_user: dict = Depends(require_admin)
+# ):
+#     """
+#     Get paginated list of all users (admin only).
+#     Supports search by username or email.
     
-    Requires: Admin authentication
-    """
-    try:
-        result = db.get_all_users(page=page, page_size=page_size, search=search)
+#     Requires: Admin authentication
+#     """
+#     try:
+#         result = db.get_all_users(page=page, page_size=page_size, search=search)
         
-        # Format created_at timestamps
-        for user in result.get("users", []):
-            if user.get("created_at"):
-                user["created_at"] = user["created_at"].isoformat() if hasattr(user["created_at"], 'isoformat') else str(user["created_at"])
+#         # Format created_at timestamps
+#         for user in result.get("users", []):
+#             if user.get("created_at"):
+#                 user["created_at"] = user["created_at"].isoformat() if hasattr(user["created_at"], 'isoformat') else str(user["created_at"])
         
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "data": result
-            }
-        )
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "data": result
+#             }
+#         )
         
-    except Exception as e:
-        logging.error(f"Error fetching users: {str(e)}")
-        traceback.print_exc()
-        return error_response(f"Failed to fetch users: {str(e)}", status_code=500)
+#     except Exception as e:
+#         logging.error(f"Error fetching users: {str(e)}")
+#         traceback.print_exc()
+#         return error_response(f"Failed to fetch users: {str(e)}", status_code=500)
 
 
 @router.get("/users/list")
@@ -169,198 +169,198 @@ async def get_users_list(current_user: dict = Depends(require_admin)):
         return error_response(f"Failed to fetch users list: {str(e)}", status_code=500)
 
 
-@router.patch("/admin/users/{user_id}/admin-status")
-async def update_user_admin_status_endpoint(
-    user_id: int,
-    request: UpdateAdminStatusRequest,
-    current_user: dict = Depends(require_admin)
-):
-    """
-    Promote or demote user to admin status (admin only).
-    Cannot remove own admin status.
+# @router.patch("/admin/users/{user_id}/admin-status")
+# async def update_user_admin_status_endpoint(
+#     user_id: int,
+#     request: UpdateAdminStatusRequest,
+#     current_user: dict = Depends(require_admin)
+# ):
+#     """
+#     Promote or demote user to admin status (admin only).
+#     Cannot remove own admin status.
     
-    Requires: Admin authentication
-    """
-    try:
-        admin_id = current_user.get("id")
+#     Requires: Admin authentication
+#     """
+#     try:
+#         admin_id = current_user.get("id")
         
-        # Update user admin status
-        updated_user = db.update_user_admin_status(
-            user_id=user_id,
-            is_admin=request.is_admin,
-            admin_id=admin_id
-        )
+#         # Update user admin status
+#         updated_user = db.update_user_admin_status(
+#             user_id=user_id,
+#             is_admin=request.is_admin,
+#             admin_id=admin_id
+#         )
         
-        # Format created_at
-        if updated_user.get("created_at"):
-            updated_user["created_at"] = updated_user["created_at"].isoformat() if hasattr(updated_user["created_at"], 'isoformat') else str(updated_user["created_at"])
+#         # Format created_at
+#         if updated_user.get("created_at"):
+#             updated_user["created_at"] = updated_user["created_at"].isoformat() if hasattr(updated_user["created_at"], 'isoformat') else str(updated_user["created_at"])
         
-        action = "promoted to admin" if request.is_admin else "demoted from admin"
+#         action = "promoted to admin" if request.is_admin else "demoted from admin"
         
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "message": f"User {action} successfully",
-                "user": updated_user
-            }
-        )
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "message": f"User {action} successfully",
+#                 "user": updated_user
+#             }
+#         )
         
-    except ValueError as ve:
-        # Validation errors (self-demotion, user not found, etc.)
-        return error_response(str(ve), status_code=400)
-    except Exception as e:
-        logging.error(f"Error updating user admin status: {str(e)}")
-        traceback.print_exc()
-        return error_response(f"Failed to update admin status: {str(e)}", status_code=500)
+#     except ValueError as ve:
+#         # Validation errors (self-demotion, user not found, etc.)
+#         return error_response(str(ve), status_code=400)
+#     except Exception as e:
+#         logging.error(f"Error updating user admin status: {str(e)}")
+#         traceback.print_exc()
+#         return error_response(f"Failed to update admin status: {str(e)}", status_code=500)
 
 
-# ==================== CALL STATUS ====================
-@router.get("/call-status/{call_id}")
-async def get_call_status(call_id: str):
-    """Optimized status check with proper connection handling"""
-    try:
-        conn = db.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT status, created_at, ended_at, duration, started_at
-                    FROM call_history 
-                    WHERE call_id = %s
-                """, (call_id,))
-                row = cursor.fetchone()
-        finally:
-            db.release_connection(conn)
+# # ==================== CALL STATUS ====================
+# @router.get("/call-status/{call_id}")
+# async def get_call_status(call_id: str):
+#     """Optimized status check with proper connection handling"""
+#     try:
+#         conn = db.get_connection()
+#         try:
+#             with conn.cursor() as cursor:
+#                 cursor.execute("""
+#                     SELECT status, created_at, ended_at, duration, started_at
+#                     FROM call_history 
+#                     WHERE call_id = %s
+#                 """, (call_id,))
+#                 row = cursor.fetchone()
+#         finally:
+#             db.release_connection(conn)
         
-        if not row:
-            return JSONResponse(
-                status_code=404,
-                content={"status": "not_found", "is_final": True}
-            )
+#         if not row:
+#             return JSONResponse(
+#                 status_code=404,
+#                 content={"status": "not_found", "is_final": True}
+#             )
         
-        current_status, created_at, ended_at, duration, started_at = row
+#         current_status, created_at, ended_at, duration, started_at = row
         
-        # Normalize status
-        if current_status not in {"initialized", "dialing", "connected", "completed", "unanswered"}:
-            STATUS_MAP = {
-                "initiated": "initialized",
-                "in_progress": "connected",
-                "failed": "unanswered",
-                "not_attended": "unanswered"
-            }
-            current_status = STATUS_MAP.get(current_status, "initialized")
+#         # Normalize status
+#         if current_status not in {"initialized", "dialing", "connected", "completed", "unanswered"}:
+#             STATUS_MAP = {
+#                 "initiated": "initialized",
+#                 "in_progress": "connected",
+#                 "failed": "unanswered",
+#                 "not_attended": "unanswered"
+#             }
+#             current_status = STATUS_MAP.get(current_status, "initialized")
         
-        # Calculate elapsed time
-        time_elapsed = 0
-        if created_at:
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
-            time_elapsed = (datetime.now(timezone.utc) - created_at).total_seconds()
+#         # Calculate elapsed time
+#         time_elapsed = 0
+#         if created_at:
+#             if created_at.tzinfo is None:
+#                 created_at = created_at.replace(tzinfo=timezone.utc)
+#             time_elapsed = (datetime.now(timezone.utc) - created_at).total_seconds()
         
-        is_final = current_status in {"completed", "unanswered"}
+#         is_final = current_status in {"completed", "unanswered"}
         
-        response = {
-            "status": current_status,
-            "message": {
-                "initialized": "Initializing...",
-                "dialing": "Dialing...",
-                "connected": "Call in progress",
-                "completed": "Call completed",
-                "unanswered": "Call not answered"
-            }.get(current_status, current_status),
-            "time_elapsed": round(time_elapsed, 1),
-            "is_final": is_final
-        }
+#         response = {
+#             "status": current_status,
+#             "message": {
+#                 "initialized": "Initializing...",
+#                 "dialing": "Dialing...",
+#                 "connected": "Call in progress",
+#                 "completed": "Call completed",
+#                 "unanswered": "Call not answered"
+#             }.get(current_status, current_status),
+#             "time_elapsed": round(time_elapsed, 1),
+#             "is_final": is_final
+#         }
         
-        if is_final and duration:
-            response["duration"] = round(duration, 1)
+#         if is_final and duration:
+#             response["duration"] = round(duration, 1)
         
-        if started_at:
-            response["started_at"] = started_at.isoformat()
-        if ended_at:
-            response["ended_at"] = ended_at.isoformat()
+#         if started_at:
+#             response["started_at"] = started_at.isoformat()
+#         if ended_at:
+#             response["ended_at"] = ended_at.isoformat()
         
-        return JSONResponse(response)
-    except Exception as e:
-        logging.error(f"get_call_status error: {e}")
-        return JSONResponse(
-            {"status": "error", "message": str(e), "is_final": True},
-            status_code=500
-        )
+#         return JSONResponse(response)
+#     except Exception as e:
+#         logging.error(f"get_call_status error: {e}")
+#         return JSONResponse(
+#             {"status": "error", "message": str(e), "is_final": True},
+#             status_code=500
+#         )
 
-# ==================== CALL HISTORY ====================
-@router.get("/call-history")
-async def get_user_call_history(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(10, le=100),
-    user=Depends(get_current_user)
-):
-    """Get call history for all agents belonging to the logged-in admin"""
-    try:
-        history = db.get_call_history_by_admin(user["id"], page, page_size)
+# # ==================== CALL HISTORY ====================
+# @router.get("/call-history")
+# async def get_user_call_history(
+#     page: int = Query(1, ge=1),
+#     page_size: int = Query(10, le=100),
+#     user=Depends(get_current_user)
+# ):
+#     """Get call history for all agents belonging to the logged-in admin"""
+#     try:
+#         history = db.get_call_history_by_admin(user["id"], page, page_size)
 
-        calls = []
-        for call in history.get("calls", []):
-            call_data = {**call}
+#         calls = []
+#         for call in history.get("calls", []):
+#             call_data = {**call}
             
-            # Format timestamps
-            for field in ["created_at", "started_at", "ended_at"]:
-                if call.get(field):
-                    call_data[field] = call[field].isoformat() if hasattr(call[field], 'isoformat') else str(call[field])
+#             # Format timestamps
+#             for field in ["created_at", "started_at", "ended_at"]:
+#                 if call.get(field):
+#                     call_data[field] = call[field].isoformat() if hasattr(call[field], 'isoformat') else str(call[field])
             
-            # Calculate display duration if not available
-            if not call_data.get("duration") and call.get("started_at") and call.get("ended_at"):
-                try:
-                    start = call["started_at"] if isinstance(call["started_at"], datetime) else datetime.fromisoformat(str(call["started_at"]))
-                    end = call["ended_at"] if isinstance(call["ended_at"], datetime) else datetime.fromisoformat(str(call["ended_at"]))
-                    call_data["duration"] = round((end - start).total_seconds(), 1)
-                except:
-                    call_data["duration"] = 0
+#             # Calculate display duration if not available
+#             if not call_data.get("duration") and call.get("started_at") and call.get("ended_at"):
+#                 try:
+#                     start = call["started_at"] if isinstance(call["started_at"], datetime) else datetime.fromisoformat(str(call["started_at"]))
+#                     end = call["ended_at"] if isinstance(call["ended_at"], datetime) else datetime.fromisoformat(str(call["ended_at"]))
+#                     call_data["duration"] = round((end - start).total_seconds(), 1)
+#                 except:
+#                     call_data["duration"] = 0
             
-            # Parse transcript from JSONB
-            transcript_text = None
-            if call.get("transcript"):
-                try:
-                    tr = call["transcript"]
-                    if isinstance(tr, str):
-                        tr = json.loads(tr)
-                    if isinstance(tr, list):
-                        lines = []
-                        for msg in tr:
-                            if msg.get("type") == "message":
-                                speaker = "Assistant" if msg.get("role") == "assistant" else "User"
-                                text = " ".join(msg.get("content", [])) if isinstance(msg.get("content"), list) else str(msg.get("content"))
-                                lines.append(f"{speaker}: {text}")
-                        transcript_text = "\n".join(lines)
-                except Exception as e:
-                    logging.warning(f"Transcript parse error for {call.get('id')}: {e}")
+#             # Parse transcript from JSONB
+#             transcript_text = None
+#             if call.get("transcript"):
+#                 try:
+#                     tr = call["transcript"]
+#                     if isinstance(tr, str):
+#                         tr = json.loads(tr)
+#                     if isinstance(tr, list):
+#                         lines = []
+#                         for msg in tr:
+#                             if msg.get("type") == "message":
+#                                 speaker = "Assistant" if msg.get("role") == "assistant" else "User"
+#                                 text = " ".join(msg.get("content", [])) if isinstance(msg.get("content"), list) else str(msg.get("content"))
+#                                 lines.append(f"{speaker}: {text}")
+#                         transcript_text = "\n".join(lines)
+#                 except Exception as e:
+#                     logging.warning(f"Transcript parse error for {call.get('id')}: {e}")
             
-            call_data["transcript_text"] = transcript_text
-            call_data["has_recording"] = bool(call.get("recording_blob"))
+#             call_data["transcript_text"] = transcript_text
+#             call_data["has_recording"] = bool(call.get("recording_blob"))
             
-            # ADD PRESIGNED URLS
-            call_data = add_presigned_urls_to_call(call_data)
+#             # ADD PRESIGNED URLS
+#             call_data = add_presigned_urls_to_call(call_data)
             
-            calls.append(call_data)
+#             calls.append(call_data)
 
-        pagination = history.get("pagination") or {
-            "page": history.get("page", page),
-            "page_size": history.get("page_size", page_size),
-            "total": history.get("total", len(calls)),
-            "completed_calls": history.get("completed_calls", 0),
-            "not_completed_calls": history.get("not_completed_calls", 0),
-        }
+#         pagination = history.get("pagination") or {
+#             "page": history.get("page", page),
+#             "page_size": history.get("page_size", page_size),
+#             "total": history.get("total", len(calls)),
+#             "completed_calls": history.get("completed_calls", 0),
+#             "not_completed_calls": history.get("not_completed_calls", 0),
+#         }
 
-        return JSONResponse(content=jsonable_encoder({
-            "user_id": user["id"],
-            "pagination": pagination,
-            "calls": calls
-        }))
+#         return JSONResponse(content=jsonable_encoder({
+#             "user_id": user["id"],
+#             "pagination": pagination,
+#             "calls": calls
+#         }))
 
-    except Exception as e:
-        logging.error(f"Error fetching history: {e}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+#     except Exception as e:
+#         logging.error(f"Error fetching history: {e}")
+#         traceback.print_exc()
+#         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== AGENT EVENT REPORTING ====================
 @router.post("/agent/report-event")
@@ -1319,103 +1319,103 @@ async def delete_agent(
 
 
 
-@router.post("/agents/toggle-status")
-async def toggle_agent_status(
-    request: ToggleAgentStatusRequest,
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Admin-only: Activate or deactivate an agent globally.
-    """
-    try:
-        # 🔐 Admin check (strict)
-        is_admin = current_user.get("is_admin") or current_user.get("role") == "admin"
-        if not is_admin:
-            return error_response("Unauthorized: Only admins can toggle agent status", 403)
+# @router.post("/agents/toggle-status")
+# async def toggle_agent_status(
+#     request: ToggleAgentStatusRequest,
+#     current_user: dict = Depends(get_current_user)
+# ):
+#     """
+#     Admin-only: Activate or deactivate an agent globally.
+#     """
+#     try:
+#         # 🔐 Admin check (strict)
+#         is_admin = current_user.get("is_admin") or current_user.get("role") == "admin"
+#         if not is_admin:
+#             return error_response("Unauthorized: Only admins can toggle agent status", 403)
 
-        admin_id = current_user["id"]
-        agent_id = request.agent_id
-        is_active = request.is_active
+#         admin_id = current_user["id"]
+#         agent_id = request.agent_id
+#         is_active = request.is_active
 
-        # Toggle agent status (global)
-        result = db.toggle_agent_status_admin(
-            admin_id=admin_id,
-            agent_id=agent_id,
-            is_active=is_active
-        )
+#         # Toggle agent status (global)
+#         result = db.toggle_agent_status_admin(
+#             admin_id=admin_id,
+#             agent_id=agent_id,
+#             is_active=is_active
+#         )
 
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "message": f"Agent {'activated' if is_active else 'deactivated'} successfully",
-                "data": result
-            }
-        )
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "message": f"Agent {'activated' if is_active else 'deactivated'} successfully",
+#                 "data": result
+#             }
+#         )
 
-    except ValueError as e:
-        return error_response(str(e), 404)
-    except Exception as e:
-        logging.error(f"Error toggling agent status: {e}")
-        traceback.print_exc()
-        return error_response("Failed to toggle agent status", 500)
+#     except ValueError as e:
+#         return error_response(str(e), 404)
+#     except Exception as e:
+#         logging.error(f"Error toggling agent status: {e}")
+#         traceback.print_exc()
+#         return error_response("Failed to toggle agent status", 500)
 
 
-@router.get("/agents/{agent_id}/status")
-async def get_agent_status(
-    agent_id: int,
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Get the activation status of a specific agent for the current user.
-    """
-    try:
-        user_id = current_user["id"]
+# @router.get("/agents/{agent_id}/status")
+# async def get_agent_status(
+#     agent_id: int,
+#     current_user: dict = Depends(get_current_user)
+# ):
+#     """
+#     Get the activation status of a specific agent for the current user.
+#     """
+#     try:
+#         user_id = current_user["id"]
         
-        # Get the status
-        status = db.get_agent_status_for_user(user_id, agent_id)
+#         # Get the status
+#         status = db.get_agent_status_for_user(user_id, agent_id)
         
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "data": {
-                    "agent_id": agent_id,
-                    **status
-                }
-            }
-        )
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "data": {
+#                     "agent_id": agent_id,
+#                     **status
+#                 }
+#             }
+#         )
         
-    except Exception as e:
-        logging.error(f"Error getting agent status: {e}")
-        traceback.print_exc()
-        return error_response("Failed to get agent status", 500)
+#     except Exception as e:
+#         logging.error(f"Error getting agent status: {e}")
+#         traceback.print_exc()
+#         return error_response("Failed to get agent status", 500)
 
-@router.get("/agents/statuses/all")
-async def get_all_agent_statuses(
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Get activation status of all agents for the current user.
-    """
-    try:
-        user_id = current_user["id"]
+# @router.get("/agents/statuses/all")
+# async def get_all_agent_statuses(
+#     current_user: dict = Depends(get_current_user)
+# ):
+#     """
+#     Get activation status of all agents for the current user.
+#     """
+#     try:
+#         user_id = current_user["id"]
         
-        # Get all agent statuses
-        statuses = db.get_all_agent_statuses_for_user(user_id)
+#         # Get all agent statuses
+#         statuses = db.get_all_agent_statuses_for_user(user_id)
         
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "data": statuses
-            }
-        )
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "data": statuses
+#             }
+#         )
         
-    except Exception as e:
-        logging.error(f"Error getting all agent statuses: {e}")
-        traceback.print_exc()
-        return error_response("Failed to get agent statuses", 500)
+#     except Exception as e:
+#         logging.error(f"Error getting all agent statuses: {e}")
+#         traceback.print_exc()
+#         return error_response("Failed to get agent statuses", 500)
 
 
 @router.post("/livekit-webhook")
