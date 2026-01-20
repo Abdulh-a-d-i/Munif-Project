@@ -218,3 +218,68 @@ class UpdateAdminStatusRequest(BaseModel):
                 "is_admin": True
             }
         }
+
+
+# ==================== GOOGLE CALENDAR MODELS ====================
+
+class GoogleAuthStatusResponse(BaseModel):
+    """Response model for Google Calendar connection status"""
+    connected: bool
+    email: Optional[str] = None
+
+
+class GoogleAuthLoginResponse(BaseModel):
+    """Response model for Google OAuth login URL"""
+    authorization_url: str
+
+
+class GoogleEvent(BaseModel):
+    """Model for a single Google Calendar event"""
+    id: str
+    summary: str
+    date: str
+    start_time: str
+    end_time: str
+    description: Optional[str] = None
+    location: Optional[str] = None
+
+
+class GoogleEventsResponse(BaseModel):
+    """Response model for list of Google Calendar events"""
+    events: List[GoogleEvent]
+
+
+class BookAppointmentRequest(BaseModel):
+    """Request model for booking an appointment via AI agent"""
+    user_id: int = Field(..., gt=0)
+    appointment_date: str = Field(..., pattern=r'^\d{4}-\d{2}-\d{2}$')  # YYYY-MM-DD
+    start_time: str = Field(..., pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # HH:MM
+    end_time: str = Field(..., pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # HH:MM
+    attendee_email: EmailStr
+    attendee_name: Optional[str] = None
+    title: str = Field(..., min_length=1)
+    description: Optional[str] = None
+    notes: Optional[str] = None
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "user_id": 1,
+                "appointment_date": "2026-01-25",
+                "start_time": "14:00",
+                "end_time": "15:00",
+                "attendee_email": "customer@example.com",
+                "attendee_name": "John Doe",
+                "title": "Consultation Call",
+                "description": "Initial consultation meeting",
+                "notes": "Discussed via AI agent"
+            }
+        }
+
+
+class BookAppointmentResponse(BaseModel):
+    """Response model for appointment booking"""
+    success: bool
+    conflict: bool = False
+    event_id: Optional[str] = None
+    message: str

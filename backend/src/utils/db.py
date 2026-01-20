@@ -54,6 +54,8 @@ class PGDB:
         self.create_call_history_table()
         self.create_appointments_table()
         self.create_user_agent_status_table()
+        self.create_google_credentials_table()
+        self.create_google_appointments_table()
         self.ensure_agent_schema_migration()
         self.ensure_user_schema_migration()
 
@@ -2351,3 +2353,306 @@ class PGDB:
                     "missed_calls": int(result["missed_calls"]) if result else 0,
                     "completed_calls": int(result["completed_calls"]) if result else 0
                 }
+
+    # ==================== GOOGLE CALENDAR INTEGRATION ====================
+    
+    def create_google_credentials_table(self):
+        """
+        Create google_credentials table to store OAuth tokens.
+        One credential set per user (UNIQUE constraint on user_id).
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS google_credentials (
+                            id SERIAL PRIMARY KEY,
+                            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                            access_token TEXT NOT NULL,
+                            refresh_token TEXT,
+                            token_expiry TIMESTAMPTZ,
+                            scopes TEXT[],
+                            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(user_id)
+                        );
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_google_credentials_user_id 
+                        ON google_credentials(user_id);
+                    """)
+                conn.commit()
+                logging.info("✅ google_credentials table created")
+            except Exception as e:
+                logging.error(f"Error creating google_credentials table: {e}")
+
+    def save_google_credentials(self, user_id: int, access_token: str, refresh_token: str = None, 
+                                token_expiry: datetime = None, scopes: list = None):
+        """
+        Save or update Google OAuth credentials for a user (upsert).
+        
+        Args:
+            user_id: User ID
+            access_token: OAuth access token
+            refresh_token: OAuth refresh token (optional)
+            token_expiry: Token expiration datetime (optional)
+            scopes: List of OAuth scopes (optional)
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute("""
+                        INSERT INTO google_credentials (
+                            user_id, access_token, refresh_token, token_expiry, scopes, updated_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id) 
+                        DO UPDATE SET
+                            access_token = EXCLUDED.access_token,
+                            refresh_token = EXCLUDED.refresh_token,
+                            token_expiry = EXCLUDED.token_expiry,
+                            scopes = EXCLUDED.scopes,
+                            updated_at = CURRENT_TIMESTAMP
+                        RETURNING *;
+                    """, (user_id, access_token, refresh_token, token_expiry, scopes))
+                    result = cursor.fetchone()
+                conn.commit()
+                logging.info(f"✅ Saved Google credentials for user {user_id}")
+                return result
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error saving Google credentials: {e}")
+                raise
+
+    def get_google_credentials(self, user_id: int):
+        """
+        Get Google OAuth credentials for a user.
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            Dict with access_token, refresh_token, token_expiry, scopes or None
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        access_token,
+                        refresh_token,
+                        token_expiry,
+                        scopes
+                    FROM google_credentials
+                    WHERE user_id = %s
+                """, (user_id,))
+                result = cursor.fetchone()
+                
+                if result and result.get("token_expiry"):
+                    # Convert to ISO format string for service
+                    result["token_expiry"] = result["token_expiry"].isoformat()
+                
+                return result
+
+    def delete_google_credentials(self, user_id: int):
+        """
+        Delete Google OAuth credentials for a user (disconnect).
+        
+        Args:
+            user_id: User ID
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        DELETE FROM google_credentials
+                        WHERE user_id = %s
+                        RETURNING id;
+                    """, (user_id,))
+                    result = cursor.fetchone()
+                conn.commit()
+                
+                if result:
+                    logging.info(f"✅ Deleted Google credentials for user {user_id}")
+                    return True
+                else:
+                    logging.warning(f"⚠️ No Google credentials found for user {user_id}")
+                    return False
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error deleting Google credentials: {e}")
+                raise
+
+    def create_google_appointments_table(self):
+        """
+        Create google_appointments table to store calendar appointments locally.
+        This provides redundancy and faster queries without API calls.
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS google_appointments (
+                            id SERIAL PRIMARY KEY,
+                            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                            appointment_date DATE NOT NULL,
+                            start_time TIME NOT NULL,
+                            end_time TIME NOT NULL,
+                            attendee_email VARCHAR(255) NOT NULL,
+                            attendee_name VARCHAR(255),
+                            title TEXT NOT NULL,
+                            description TEXT,
+                            notes TEXT,
+                            status VARCHAR(50) DEFAULT 'scheduled',
+                            google_event_id TEXT,
+                            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_google_appointments_user_id 
+                        ON google_appointments(user_id);
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_google_appointments_date 
+                        ON google_appointments(appointment_date);
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_google_appointments_status 
+                        ON google_appointments(status);
+                    """)
+                conn.commit()
+                logging.info("✅ google_appointments table created")
+            except Exception as e:
+                logging.error(f"Error creating google_appointments table: {e}")
+
+    def create_google_appointment(self, user_id: int, appointment_date: str, start_time: str, 
+                                  end_time: str, attendee_email: str, attendee_name: str = None,
+                                  title: str = "", description: str = None, notes: str = None,
+                                  google_event_id: str = None):
+        """
+        Save a Google Calendar appointment to local database.
+        
+        Args:
+            user_id: User ID
+            appointment_date: Date in YYYY-MM-DD format
+            start_time: Start time in HH:MM format
+            end_time: End time in HH:MM format
+            attendee_email: Attendee's email address
+            attendee_name: Attendee's name (optional)
+            title: Appointment title
+            description: Appointment description (optional)
+            notes: Additional notes (optional)
+            google_event_id: Google Calendar event ID (optional)
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute("""
+                        INSERT INTO google_appointments (
+                            user_id, appointment_date, start_time, end_time,
+                            attendee_email, attendee_name, title, description,
+                            notes, google_event_id
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING *;
+                    """, (
+                        user_id, appointment_date, start_time, end_time,
+                        attendee_email, attendee_name, title, description,
+                        notes, google_event_id
+                    ))
+                    result = cursor.fetchone()
+                conn.commit()
+                logging.info(f"✅ Created Google appointment {result['id']} for user {user_id}")
+                return result
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error creating Google appointment: {e}")
+                raise
+
+    def get_google_appointments_by_user(self, user_id: int, start_date: str = None, end_date: str = None):
+        """
+        Get Google Calendar appointments for a user.
+        
+        Args:
+            user_id: User ID
+            start_date: Start date filter (YYYY-MM-DD, optional)
+            end_date: End date filter (YYYY-MM-DD, optional)
+            
+        Returns:
+            List of appointment dicts
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                if start_date and end_date:
+                    cursor.execute("""
+                        SELECT * FROM google_appointments
+                        WHERE user_id = %s 
+                        AND appointment_date BETWEEN %s AND %s
+                        ORDER BY appointment_date DESC, start_time DESC
+                    """, (user_id, start_date, end_date))
+                elif start_date:
+                    cursor.execute("""
+                        SELECT * FROM google_appointments
+                        WHERE user_id = %s 
+                        AND appointment_date >= %s
+                        ORDER BY appointment_date DESC, start_time DESC
+                    """, (user_id, start_date))
+                else:
+                    cursor.execute("""
+                        SELECT * FROM google_appointments
+                        WHERE user_id = %s
+                        ORDER BY appointment_date DESC, start_time DESC
+                    """, (user_id,))
+                
+                appointments = cursor.fetchall()
+                
+                # Format dates and times
+                for apt in appointments:
+                    if apt.get("appointment_date"):
+                        apt["appointment_date"] = apt["appointment_date"].isoformat()
+                    if apt.get("start_time"):
+                        apt["start_time"] = str(apt["start_time"])
+                    if apt.get("end_time"):
+                        apt["end_time"] = str(apt["end_time"])
+                    if apt.get("created_at"):
+                        apt["created_at"] = apt["created_at"].isoformat()
+                    if apt.get("updated_at"):
+                        apt["updated_at"] = apt["updated_at"].isoformat()
+                
+                return appointments
+
+    def get_google_appointments_by_date(self, user_id: int, date: str):
+        """
+        Get Google Calendar appointments for a specific date.
+        
+        Args:
+            user_id: User ID
+            date: Date in YYYY-MM-DD format
+            
+        Returns:
+            List of appointment dicts for that date
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT * FROM google_appointments
+                    WHERE user_id = %s AND appointment_date = %s
+                    ORDER BY start_time ASC
+                """, (user_id, date))
+                
+                appointments = cursor.fetchall()
+                
+                # Format times
+                for apt in appointments:
+                    if apt.get("appointment_date"):
+                        apt["appointment_date"] = apt["appointment_date"].isoformat()
+                    if apt.get("start_time"):
+                        apt["start_time"] = str(apt["start_time"])
+                    if apt.get("end_time"):
+                        apt["end_time"] = str(apt["end_time"])
+                    if apt.get("created_at"):
+                        apt["created_at"] = apt["created_at"].isoformat()
+                    if apt.get("updated_at"):
+                        apt["updated_at"] = apt["updated_at"].isoformat()
+                
+                return appointments

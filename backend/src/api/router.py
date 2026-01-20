@@ -2168,7 +2168,7 @@ async def submit_contact_form(request: ContactFormRequest):
             logging.error(f"Failed to send contact form email from {request.email}")
             return error_response("Failed to send message. Please try again.", 500)
         
-        logging.info(f" Contact form submitted by {request.first_name} {request.last_name} ({request.email})")
+        logging.info(f"✅ Contact form submitted by {request.first_name} {request.last_name} ({request.email})")
         
         return JSONResponse({
             "success": True,
@@ -2179,3 +2179,413 @@ async def submit_contact_form(request: ContactFormRequest):
         logging.error(f"Error processing contact form: {e}")
         traceback.print_exc()
         return error_response("Failed to submit contact form", 500)
+
+
+# ==================== GOOGLE CALENDAR INTEGRATION ====================
+
+@router.get("/google/auth/status")
+async def google_auth_status(current_user: dict = Depends(get_current_user)):
+    """
+    Check if the current user has connected their Google Calendar.
+    Returns connection status and email if connected.
+    """
+    try:
+        user_id = current_user["id"]
+        
+        credentials = db.get_google_credentials(user_id)
+        
+        if credentials:
+            # Try to get user's email from Google (optional enhancement)
+            return JSONResponse({
+                "connected": True,
+                "email": current_user.get("email")  # Using user's registered email
+            })
+        else:
+            return JSONResponse({
+                "connected": False,
+                "email": None
+            })
+            
+    except Exception as e:
+        logging.error(f"Error checking Google auth status: {e}")
+        traceback.print_exc()
+        return error_response("Failed to check Google Calendar status", 500)
+
+
+@router.get("/google/auth/login")
+async def google_auth_login(current_user: dict = Depends(get_current_user)):
+    """
+    Initiate Google OAuth flow.
+    Returns authorization URL for frontend to redirect user to Google consent screen.
+    """
+    try:
+        from google_auth_oauthlib.flow import Flow
+        
+        user_id = current_user["id"]
+        
+        # Get environment variables
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
+        
+        if not all([client_id, client_secret, redirect_uri]):
+            logging.error("Missing Google OAuth environment variables")
+            return error_response("Google Calendar integration not configured", 500)
+        
+        # Create OAuth flow
+        flow = Flow.from_client_config(
+            client_config={
+                "web": {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [redirect_uri]
+                }
+            },
+            scopes=['https://www.googleapis.com/auth/calendar']
+        )
+        
+        flow.redirect_uri = redirect_uri
+        
+        # Generate authorization URL with user_id in state
+        authorization_url, state = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true',
+            state=str(user_id),  # Pass user_id in state for callback
+            prompt='consent'  # Force consent screen to get refresh token
+        )
+        
+        logging.info(f"✅ Generated OAuth URL for user {user_id}")
+        
+        return JSONResponse({
+            "authorization_url": authorization_url
+        })
+        
+    except Exception as e:
+        logging.error(f"Error generating Google OAuth URL: {e}")
+        traceback.print_exc()
+        return error_response("Failed to initiate Google Calendar connection", 500)
+
+
+@router.get("/google/callback")
+async def google_callback(request: Request):
+    """
+    Handle OAuth callback from Google.
+    Exchanges authorization code for tokens and saves to database.
+    Redirects user to frontend success page.
+    """
+    try:
+        from google_auth_oauthlib.flow import Flow
+        
+        # Get query parameters
+        code = request.query_params.get("code")
+        state = request.query_params.get("state")  # This contains user_id
+        error = request.query_params.get("error")
+        
+        if error:
+            logging.error(f"OAuth error: {error}")
+            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+            return RedirectResponse(f"{frontend_url}/calendar?error={error}")
+        
+        if not code or not state:
+            return error_response("Missing authorization code or state", 400)
+        
+        user_id = int(state)
+        
+        # Get environment variables
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
+        
+        # Create OAuth flow
+        flow = Flow.from_client_config(
+            client_config={
+                "web": {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [redirect_uri]
+                }
+            },
+            scopes=['https://www.googleapis.com/auth/calendar']
+        )
+        
+        flow.redirect_uri = redirect_uri
+        
+        # Exchange code for tokens
+        flow.fetch_token(code=code)
+        credentials = flow.credentials
+        
+        # Save credentials to database
+        db.save_google_credentials(
+            user_id=user_id,
+            access_token=credentials.token,
+            refresh_token=credentials.refresh_token,
+            token_expiry=credentials.expiry,
+            scopes=credentials.scopes
+        )
+        
+        logging.info(f"✅ Saved Google credentials for user {user_id}")
+        
+        # Redirect to frontend success page
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+        return RedirectResponse(f"{frontend_url}/calendar?success=true")
+        
+    except Exception as e:
+        logging.error(f"Error in Google OAuth callback: {e}")
+        traceback.print_exc()
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+        return RedirectResponse(f"{frontend_url}/calendar?error=callback_failed")
+
+
+@router.post("/google/disconnect")
+async def google_disconnect(current_user: dict = Depends(get_current_user)):
+    """
+    Disconnect Google Calendar by deleting stored credentials.
+    """
+    try:
+        user_id = current_user["id"]
+        
+        deleted = db.delete_google_credentials(user_id)
+        
+        if deleted:
+            return JSONResponse({
+                "success": True,
+                "message": "Google Calendar disconnected successfully"
+            })
+        else:
+            return JSONResponse({
+                "success": False,
+                "message": "No Google Calendar connection found"
+            })
+            
+    except Exception as e:
+        logging.error(f"Error disconnecting Google Calendar: {e}")
+        traceback.print_exc()
+        return error_response("Failed to disconnect Google Calendar", 500)
+
+
+@router.get("/google/events")
+async def google_events(
+    time_min: str = Query(None),
+    time_max: str = Query(None),
+    max_results: int = Query(100, le=250),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Fetch calendar events from user's Google Calendar.
+    Automatically refreshes tokens if needed.
+    """
+    try:
+        from services.google_calendar_service import GoogleCalendarService
+        
+        user_id = current_user["id"]
+        
+        # Get credentials
+        credentials = db.get_google_credentials(user_id)
+        
+        if not credentials:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": "Google Calendar not connected",
+                    "message": "Please connect your Google Calendar first"
+                }
+            )
+        
+        # Initialize service
+        gcal = GoogleCalendarService(credentials)
+        
+        # Parse time parameters
+        if time_min:
+            time_min_dt = datetime.fromisoformat(time_min.replace('Z', '+00:00'))
+        else:
+            time_min_dt = datetime.now(timezone.utc)
+        
+        if time_max:
+            time_max_dt = datetime.fromisoformat(time_max.replace('Z', '+00:00'))
+        else:
+            time_max_dt = None
+        
+        # Fetch events
+        events = gcal.list_events(time_min_dt, time_max_dt, max_results)
+        
+        # Check if credentials were refreshed
+        updated_creds = gcal.get_updated_credentials()
+        if updated_creds['access_token'] != credentials['access_token']:
+            db.save_google_credentials(user_id, **updated_creds)
+            logging.info(f"🔄 Refreshed Google credentials for user {user_id}")
+        
+        return JSONResponse({
+            "events": events
+        })
+        
+    except Exception as e:
+        logging.error(f"Error fetching Google Calendar events: {e}")
+        traceback.print_exc()
+        return error_response("Failed to fetch calendar events", 500)
+
+
+# ==================== AGENT-FACING GOOGLE CALENDAR ENDPOINTS ====================
+
+@router.get("/agent/get-google-credentials/{user_id}")
+async def agent_get_google_credentials(user_id: int):
+    """
+    Check if a user has Google Calendar connected (for AI agent).
+    Returns connection status only, not actual credentials.
+    """
+    try:
+        credentials = db.get_google_credentials(user_id)
+        
+        return JSONResponse({
+            "user_id": user_id,
+            "connected": credentials is not None
+        })
+        
+    except Exception as e:
+        logging.error(f"Error checking Google credentials for agent: {e}")
+        traceback.print_exc()
+        return error_response("Failed to check Google Calendar status", 500)
+
+
+@router.get("/agent/get-google-appointments/{user_id}")
+async def agent_get_google_appointments(
+    user_id: int,
+    date: str = Query(..., description="Date in YYYY-MM-DD format")
+):
+    """
+    Get appointments for a specific date (for AI agent).
+    Returns appointments from local database.
+    """
+    try:
+        # Validate date format
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            return error_response("Invalid date format. Use YYYY-MM-DD", 400)
+        
+        # Get appointments from database
+        appointments = db.get_google_appointments_by_date(user_id, date)
+        
+        return JSONResponse({
+            "user_id": user_id,
+            "date": date,
+            "appointments": appointments,
+            "count": len(appointments)
+        })
+        
+    except Exception as e:
+        logging.error(f"Error fetching appointments for agent: {e}")
+        traceback.print_exc()
+        return error_response("Failed to fetch appointments", 500)
+
+
+@router.post("/agent/book-google-appointment")
+async def agent_book_google_appointment(request: Request):
+    """
+    Book an appointment via AI agent.
+    Creates event in Google Calendar and saves to local database.
+    Checks for conflicts before booking.
+    """
+    try:
+        from services.google_calendar_service import GoogleCalendarService
+        
+        data = await request.json()
+        
+        # Extract and validate data
+        user_id = data.get("user_id")
+        appointment_date = data.get("appointment_date")
+        start_time = data.get("start_time")
+        end_time = data.get("end_time")
+        attendee_email = data.get("attendee_email")
+        attendee_name = data.get("attendee_name")
+        title = data.get("title")
+        description = data.get("description", "")
+        notes = data.get("notes", "")
+        
+        if not all([user_id, appointment_date, start_time, end_time, attendee_email, title]):
+            return error_response("Missing required fields", 400)
+        
+        # Get credentials
+        credentials = db.get_google_credentials(user_id)
+        
+        if not credentials:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "success": False,
+                    "conflict": False,
+                    "message": "User has not connected Google Calendar"
+                }
+            )
+        
+        # Initialize service
+        gcal = GoogleCalendarService(credentials)
+        
+        # Parse datetime
+        start_datetime = datetime.strptime(f"{appointment_date} {start_time}", "%Y-%m-%d %H:%M")
+        start_datetime = start_datetime.replace(tzinfo=timezone.utc)
+        
+        end_datetime = datetime.strptime(f"{appointment_date} {end_time}", "%Y-%m-%d %H:%M")
+        end_datetime = end_datetime.replace(tzinfo=timezone.utc)
+        
+        # Check availability
+        is_available = gcal.check_availability(start_datetime, end_datetime)
+        
+        if not is_available:
+            logging.warning(f"⚠️ Time slot conflict for user {user_id} on {appointment_date} {start_time}-{end_time}")
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "conflict": True,
+                    "message": "Time slot not available - conflicting event exists"
+                }
+            )
+        
+        # Create event in Google Calendar
+        event = gcal.create_event(
+            summary=title,
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+            description=description,
+            attendees=[attendee_email] if attendee_email else []
+        )
+        
+        google_event_id = event.get('id')
+        
+        # Save to local database
+        db.create_google_appointment(
+            user_id=user_id,
+            appointment_date=appointment_date,
+            start_time=start_time,
+            end_time=end_time,
+            attendee_email=attendee_email,
+            attendee_name=attendee_name,
+            title=title,
+            description=description,
+            notes=notes,
+            google_event_id=google_event_id
+        )
+        
+        # Check if credentials were refreshed
+        updated_creds = gcal.get_updated_credentials()
+        if updated_creds['access_token'] != credentials['access_token']:
+            db.save_google_credentials(user_id, **updated_creds)
+            logging.info(f"🔄 Refreshed Google credentials for user {user_id}")
+        
+        logging.info(f"✅ Booked appointment for user {user_id}: {title} on {appointment_date} {start_time}-{end_time}")
+        
+        return JSONResponse({
+            "success": True,
+            "conflict": False,
+            "event_id": google_event_id,
+            "message": "Appointment booked successfully"
+        })
+        
+    except Exception as e:
+        logging.error(f"Error booking appointment via agent: {e}")
+        traceback.print_exc()
+        return error_response(f"Failed to book appointment: {str(e)}", 500)
