@@ -55,7 +55,6 @@ class PGDB:
         self.create_appointments_table()
         self.create_user_agent_status_table()
         self.create_google_credentials_table()
-        self.create_google_appointments_table()
         self.ensure_agent_schema_migration()
         self.ensure_user_schema_migration()
 
@@ -2482,49 +2481,6 @@ class PGDB:
                 logging.error(f"Error deleting Google credentials: {e}")
                 raise
 
-    def create_google_appointments_table(self):
-        """
-        Create google_appointments table to store calendar appointments locally.
-        This provides redundancy and faster queries without API calls.
-        """
-        with self.get_connection_context() as conn:
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS google_appointments (
-                            id SERIAL PRIMARY KEY,
-                            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                            appointment_date DATE NOT NULL,
-                            start_time TIME NOT NULL,
-                            end_time TIME NOT NULL,
-                            attendee_email VARCHAR(255) NOT NULL,
-                            attendee_name VARCHAR(255),
-                            title TEXT NOT NULL,
-                            description TEXT,
-                            notes TEXT,
-                            status VARCHAR(50) DEFAULT 'scheduled',
-                            google_event_id TEXT,
-                            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-                        );
-                    """)
-                    cursor.execute("""
-                        CREATE INDEX IF NOT EXISTS idx_google_appointments_user_id 
-                        ON google_appointments(user_id);
-                    """)
-                    cursor.execute("""
-                        CREATE INDEX IF NOT EXISTS idx_google_appointments_date 
-                        ON google_appointments(appointment_date);
-                    """)
-                    cursor.execute("""
-                        CREATE INDEX IF NOT EXISTS idx_google_appointments_status 
-                        ON google_appointments(status);
-                    """)
-                conn.commit()
-                logging.info("✅ google_appointments table created")
-            except Exception as e:
-                logging.error(f"Error creating google_appointments table: {e}")
-
     def create_google_appointment(self, user_id: int, appointment_date: str, start_time: str, 
                                   end_time: str, attendee_email: str, attendee_name: str = None,
                                   title: str = "", description: str = None, notes: str = None,
@@ -2656,3 +2612,5 @@ class PGDB:
                         apt["updated_at"] = apt["updated_at"].isoformat()
                 
                 return appointments
+
+
