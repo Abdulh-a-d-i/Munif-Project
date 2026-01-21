@@ -462,13 +462,13 @@ async def save_call_data(request: Request):
     This receives:
     - transcript_blob: Path in Hetzner bucket
     - recording_blob: Path in Hetzner bucket
-    - call_duration_seconds: ACCURATE duration from agent (SIP participant join → leave)
+    - call_duration_seconds: ACCURATE duration from agent (SIP participant join â†’ leave)
     - agent_id: To update used_minutes
     
     Backend will:
     1. Store paths + duration in DB
     2. Update agent's used_minutes (accumulative)
-    3. Download transcript after 5s delay → Store JSONB in DB
+    3. Download transcript after 5s delay â†’ Store JSONB in DB
     """
     try:
         data = await request.json()
@@ -544,7 +544,7 @@ async def save_call_data(request: Request):
                 
                 logging.info(
                     f" Agent {agent_id} minutes updated: "
-                    f"{old_used:.2f} → {new_used:.2f} min "
+                    f"{old_used:.2f} â†’ {new_used:.2f} min "
                     f"(+{duration_minutes:.2f} min from call {call_id})"
                 )
                 
@@ -1333,7 +1333,7 @@ async def delete_agent(
 #     Admin-only: Activate or deactivate an agent globally.
 #     """
 #     try:
-#         # 🔐 Admin check (strict)
+#         # ðŸ” Admin check (strict)
 #         is_admin = current_user.get("is_admin") or current_user.get("role") == "admin"
 #         if not is_admin:
 #             return error_response("Unauthorized: Only admins can toggle agent status", 403)
@@ -1729,7 +1729,7 @@ async def reset_password(request: ResetPasswordRequest):
 #     logger = logging.getLogger(__name__)
     
 #     try:
-#         logger.info("📥 Starting voice migration from JSON...")
+#         logger.info("ðŸ“¥ Starting voice migration from JSON...")
         
 #         # Read and parse JSON
 #         content = await voices_json.read()
@@ -1738,7 +1738,7 @@ async def reset_password(request: ResetPasswordRequest):
 #         if not isinstance(voices_data, list):
 #             return error_response("Invalid JSON format. Expected array of voice objects.", 400)
         
-#         logger.info(f"📋 Found {len(voices_data)} voice records in JSON")
+#         logger.info(f"ðŸ“‹ Found {len(voices_data)} voice records in JSON")
         
 #         # Validate required fields
 #         required_fields = ['voice_name', 'voice_id', 'language', 'country_code', 'gender', 'audio_blob_path']
@@ -1752,7 +1752,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 # Validate fields
 #                 missing_fields = [field for field in required_fields if field not in voice]
 #                 if missing_fields:
-#                     logger.warning(f"⚠️ Record {idx}: Missing fields {missing_fields}, skipping")
+#                     logger.warning(f"âš ï¸ Record {idx}: Missing fields {missing_fields}, skipping")
 #                     failed.append(f"{voice.get('voice_name', 'Unknown')}: Missing {missing_fields}")
 #                     continue
                 
@@ -1768,7 +1768,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 })
                 
 #                 inserted_count += 1
-#                 logger.info(f"✅ [{idx}/{len(voices_data)}] Inserted: {voice['voice_name']} ({voice['voice_id']})")
+#                 logger.info(f"âœ… [{idx}/{len(voices_data)}] Inserted: {voice['voice_name']} ({voice['voice_id']})")
                 
 #             except Exception as e:
 #                 error_msg = str(e)
@@ -1822,7 +1822,7 @@ async def reset_password(request: ResetPasswordRequest):
     
 #     try:
 #         # ==================== STEP 1: PARSE DOCUMENT ====================
-#         logger.info("📋 Step 1: Parsing voice document...")
+#         logger.info("ðŸ“‹ Step 1: Parsing voice document...")
 #         doc_content = (await voice_doc.read()).decode('utf-8')
         
 #         # Language mapping
@@ -1851,7 +1851,7 @@ async def reset_password(request: ResetPasswordRequest):
 #             for lang_name, lang_code in language_patterns.items():
 #                 if lang_name.lower() in line.lower() and ('voice' in line.lower() or 'agent' in line.lower()):
 #                     current_language = lang_code
-#                     logger.info(f"🌐 Found language section: {lang_name.upper()} ({lang_code})")
+#                     logger.info(f"ðŸŒ Found language section: {lang_name.upper()} ({lang_code})")
 #                     break
             
 #             # FIX: Match ANY "Name:" pattern (not just "First Name:", "Second Name:", etc.)
@@ -1859,7 +1859,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 # Save previous voice if complete
 #                 if current_voice and all(k in current_voice for k in ['voice_name', 'gender', 'voice_id', 'audio_filename']):
 #                     voices.append(current_voice)
-#                     logger.info(f"  ✓ Added: {current_voice['voice_name']}")
+#                     logger.info(f"  âœ“ Added: {current_voice['voice_name']}")
                 
 #                 # Start new voice
 #                 name = re.sub(r'^(First\s+|Second\s+|Third\s+|Fourth\s+)?Name:\s*', '', line, flags=re.IGNORECASE).strip()
@@ -1886,16 +1886,16 @@ async def reset_password(request: ResetPasswordRequest):
 #         # Add last voice
 #         if current_voice and all(k in current_voice for k in ['voice_name', 'gender', 'voice_id', 'audio_filename']):
 #             voices.append(current_voice)
-#             logger.info(f"  ✓ Added: {current_voice['voice_name']}")
+#             logger.info(f"  âœ“ Added: {current_voice['voice_name']}")
         
-#         logger.info(f"✅ Parsed {len(voices)} voices from document")
+#         logger.info(f"âœ… Parsed {len(voices)} voices from document")
         
 #         if not voices:
 #             return error_response("No voices found in document", 400)
         
 #         # Log parsed voices for debugging
 #         for v in voices:
-#             logger.info(f"  📝 {v['voice_name']} ({v['language']}) - {v['voice_id']}")
+#             logger.info(f"  ðŸ“ {v['voice_name']} ({v['language']}) - {v['voice_id']}")
 #             logger.info(f"     Audio: {v['audio_filename']}")
         
 #         # ==================== STEP 2: SAVE AUDIO FILES TEMPORARILY ====================
@@ -1920,7 +1920,7 @@ async def reset_password(request: ResetPasswordRequest):
 #             normalized_name = audio_file.filename.lower().replace(' ', '').replace('_', '').replace('-', '')
 #             audio_file_map[normalized_name] = file_path
             
-#             logger.info(f"  ✓ Saved: {audio_file.filename}")
+#             logger.info(f"  âœ“ Saved: {audio_file.filename}")
         
 #         logger.info(f" Saved {len(audio_files)} audio files")
         
@@ -1936,7 +1936,7 @@ async def reset_password(request: ResetPasswordRequest):
 #             if expected_filename in audio_file_map:
 #                 voice['audio_path'] = audio_file_map[expected_filename]
 #                 matched_voices.append(voice)
-#                 logger.info(f" Exact match: {voice['voice_name']} → {expected_filename}")
+#                 logger.info(f" Exact match: {voice['voice_name']} â†’ {expected_filename}")
 #                 matched = True
 #                 continue
             
@@ -1945,7 +1945,7 @@ async def reset_password(request: ResetPasswordRequest):
 #             if exact_path.exists():
 #                 voice['audio_path'] = exact_path
 #                 matched_voices.append(voice)
-#                 logger.info(f" File system match: {voice['voice_name']} → {expected_filename}")
+#                 logger.info(f" File system match: {voice['voice_name']} â†’ {expected_filename}")
 #                 matched = True
 #                 continue
             
@@ -1956,7 +1956,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 voice['audio_path'] = audio_file_map[normalized_expected]
 #                 matched_voices.append(voice)
 #                 actual_name = audio_file_map[normalized_expected].name
-#                 logger.info(f" Fuzzy match: {voice['voice_name']} → {actual_name}")
+#                 logger.info(f" Fuzzy match: {voice['voice_name']} â†’ {actual_name}")
 #                 matched = True
 #                 continue
             
@@ -1967,7 +1967,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                     if voice_id in filename.lower():
 #                         voice['audio_path'] = filepath
 #                         matched_voices.append(voice)
-#                         logger.info(f" ID match: {voice['voice_name']} → {filepath.name}")
+#                         logger.info(f" ID match: {voice['voice_name']} â†’ {filepath.name}")
 #                         matched = True
 #                         break
             
@@ -2013,7 +2013,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 voice['audio_blob_path'] = blob_path
 #                 uploaded_voices.append(voice)
                 
-#                 logger.info(f" Uploaded: {voice['voice_name']} → {blob_path}")
+#                 logger.info(f" Uploaded: {voice['voice_name']} â†’ {blob_path}")
                 
 #             except Exception as e:
 #                 error_msg = f"Upload failed for {voice['voice_name']}: {str(e)}"
@@ -2168,7 +2168,7 @@ async def submit_contact_form(request: ContactFormRequest):
             logging.error(f"Failed to send contact form email from {request.email}")
             return error_response("Failed to send message. Please try again.", 500)
         
-        logging.info(f"✅ Contact form submitted by {request.first_name} {request.last_name} ({request.email})")
+        logging.info(f"âœ… Contact form submitted by {request.first_name} {request.last_name} ({request.email})")
         
         return JSONResponse({
             "success": True,
@@ -2258,7 +2258,11 @@ async def google_auth_login(current_user: dict = Depends(get_current_user)):
             prompt='consent'  # Force consent screen to get refresh token
         )
         
-        logging.info(f"✅ Generated OAuth URL for user {user_id}")
+        logging.info(f"âœ… Generated OAuth URL for user {user_id}")
+        logging.error("===== GOOGLE OAUTH RUNTIME CHECK =====")
+        logging.error(f"CLIENT_ID = {client_id}")
+        logging.error(f"REDIRECT_URI = '{redirect_uri}'")
+        logging.error("=====================================")
         
         return JSONResponse({
             "authorization_url": authorization_url
@@ -2275,11 +2279,9 @@ async def google_callback(request: Request):
     """
     Handle OAuth callback from Google.
     Exchanges authorization code for tokens and saves to database.
-    Redirects user to frontend success page.
+    Redirects user to frontend dashboard.
     """
     try:
-        import sys
-        import os
         from google_auth_oauthlib.flow import Flow
         
         # Get query parameters
@@ -2287,13 +2289,15 @@ async def google_callback(request: Request):
         state = request.query_params.get("state")  # This contains user_id
         error = request.query_params.get("error")
         
+        frontend_url = os.getenv("FRONTEND_URL", "https://mrbot-ki.de")
+        
         if error:
             logging.error(f"OAuth error: {error}")
-            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-            return RedirectResponse(f"{frontend_url}/calendar?error={error}")
+            # Redirect to dashboard with error
+            return RedirectResponse(f"{frontend_url}/dashboard?calendar_error={error}")
         
         if not code or not state:
-            return error_response("Missing authorization code or state", 400)
+            return RedirectResponse(f"{frontend_url}/dashboard?calendar_error=missing_params")
         
         user_id = int(state)
         
@@ -2333,15 +2337,14 @@ async def google_callback(request: Request):
         
         logging.info(f"✅ Saved Google credentials for user {user_id}")
         
-        # Redirect to frontend success page
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-        return RedirectResponse(f"{frontend_url}/calendar?success=true")
+        # Redirect to dashboard with success message
+        return RedirectResponse(f"{frontend_url}/dashboard?calendar_success=true")
         
     except Exception as e:
         logging.error(f"Error in Google OAuth callback: {e}")
         traceback.print_exc()
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-        return RedirectResponse(f"{frontend_url}/calendar?error=callback_failed")
+        frontend_url = os.getenv("FRONTEND_URL", "https://mrbot-ki.de")
+        return RedirectResponse(f"{frontend_url}/dashboard?calendar_error=callback_failed")
 
 
 @router.post("/google/disconnect")
@@ -2424,7 +2427,7 @@ async def google_events(
         updated_creds = gcal.get_updated_credentials()
         if updated_creds['access_token'] != credentials['access_token']:
             db.save_google_credentials(user_id, **updated_creds)
-            logging.info(f"🔄 Refreshed Google credentials for user {user_id}")
+            logging.info(f"ðŸ”„ Refreshed Google credentials for user {user_id}")
         
         return JSONResponse({
             "events": events
@@ -2573,6 +2576,7 @@ async def book_google_appointment_for_agent(request: Request):
         is_available = gcal.check_availability(start_datetime, end_datetime)
         
         if not is_available:
+            logging.warning(f"⚠️ Time slot conflict for user {user_id} on {appointment_date} {start_time}-{end_time}")
             return JSONResponse(
                 status_code=409,
                 content={
@@ -2611,8 +2615,9 @@ async def book_google_appointment_for_agent(request: Request):
         updated_creds = gcal.get_updated_credentials()
         if updated_creds['access_token'] != credentials['access_token']:
             db.save_google_credentials(user_id, **updated_creds)
+            logging.info(f"🔄 Refreshed Google credentials for user {user_id}")
         
-        logging.info(f" Appointment booked in Google Calendar: {event['id']}")
+        logging.info(f"✅ Booked appointment for user {user_id}: {title} on {appointment_date} {start_time}-{end_time}")
         
         return JSONResponse({
             "success": True,
