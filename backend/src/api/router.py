@@ -2219,6 +2219,8 @@ async def google_auth_login(current_user: dict = Depends(get_current_user)):
     Returns authorization URL for frontend to redirect user to Google consent screen.
     """
     try:
+        import sys
+        import os
         from google_auth_oauthlib.flow import Flow
         
         user_id = current_user["id"]
@@ -2276,6 +2278,8 @@ async def google_callback(request: Request):
     Redirects user to frontend success page.
     """
     try:
+        import sys
+        import os
         from google_auth_oauthlib.flow import Flow
         
         # Get query parameters
@@ -2379,6 +2383,10 @@ async def google_events(
     Automatically refreshes tokens if needed.
     """
     try:
+        import sys
+        import os
+        # Add parent directory to path to import from services folder
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
         from services.google_calendar_service import GoogleCalendarService
         
         user_id = current_user["id"]
@@ -2490,6 +2498,10 @@ async def agent_book_google_appointment(request: Request):
     Checks for conflicts before booking.
     """
     try:
+        import sys
+        import os
+        # Add parent directory to path to import from services folder
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
         from services.google_calendar_service import GoogleCalendarService
         
         data = await request.json()
