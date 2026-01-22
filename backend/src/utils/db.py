@@ -2093,6 +2093,46 @@ class PGDB:
                 logging.error(f"Error linking appointment to call: {e}")
                 raise
 
+    def get_user_appointments(self, user_id: int, from_date: str = None):
+        """
+        Get appointments for a user from local database.
+        Optionally filter by date (from_date onwards).
+        
+        Args:
+            user_id: User ID
+            from_date: Optional ISO format date string (YYYY-MM-DD)
+            
+        Returns:
+            List of appointment dictionaries
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                if from_date:
+                    cursor.execute("""
+                        SELECT * FROM appointments
+                        WHERE user_id = %s AND scheduled_time >= %s
+                        ORDER BY scheduled_time ASC
+                    """, (user_id, from_date))
+                else:
+                    cursor.execute("""
+                        SELECT * FROM appointments
+                        WHERE user_id = %s
+                        ORDER BY scheduled_time ASC
+                    """, (user_id,))
+                
+                appointments = cursor.fetchall()
+                
+                # Format datetime fields
+                for apt in appointments:
+                    if apt.get("scheduled_time"):
+                        apt["scheduled_time"] = apt["scheduled_time"].isoformat()
+                    if apt.get("created_at"):
+                        apt["created_at"] = apt["created_at"].isoformat()
+                    if apt.get("updated_at"):
+                        apt["updated_at"] = apt["updated_at"].isoformat()
+                
+                return appointments
+
     def add_agent_fields_if_not_exists(self):
         """
         Add new fields to agents table if they don't exist:

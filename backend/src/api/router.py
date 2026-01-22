@@ -1551,88 +1551,266 @@ async def get_agents_by_owner(
         traceback.print_exc()
         return error_response("Failed to fetch agents by owner", 500)
     
-
-@router.post("/agent/book-appointment")
-async def book_appointment(request: Request):
+@router.get("/agent/get-appointments/{user_id}")
+async def get_appointments(user_id: int, from_date: str = None):
     """
-    API for LiveKit agent to book an appointment.
-    Sends confirmation emails to BOTH customer AND owner.
+    API for LiveKit agent to get all appointments.
+    Fetches from BOTH Google Calendar (if connected) AND local database.
+    Merges results and returns combined list.
     """
     try:
-        data = await request.json()
+        from services.google_calendar_service import GoogleCalendarService
         
-        user_id = data.get("user_id")  # This is agent_id
-        appointment_date = data.get("appointment_date") 
-        start_time = data.get("start_time")
-        end_time = data.get("end_time")
-        customer_name = data.get("customer_name", "Valued Customer")
-        customer_email = data.get("customer_email")
-        customer_phone = data.get("customer_phone")
-        title = data.get("title", "Appointment")
-        description = data.get("description", "")
-        organizer_name = data.get("organizer_name")
+        all_appointments = []
         
-        if not all([user_id, appointment_date, start_time, end_time, customer_email]):
-            return error_response("Missing required fields", status_code=400)
-        
-        # Get agent details to fetch owner_email
-        agent = db.get_agent_by_id(user_id)
-        if not agent:
-            return error_response("Agent not found", status_code=404)
-        
-        owner_email = agent.get("owner_email")
-        owner_name = agent.get("owner_name", "Business Owner")
-        
-        # Send email to CUSTOMER
-        customer_email_sent = await mail_obj.send_email_with_calendar_event(
-            attendee_email=customer_email,
-            attendee_name=customer_name,
-            appointment_date=appointment_date,
-            start_time=start_time,
-            end_time=end_time,
-            title=title,
-            description=description,
-            organizer_name=organizer_name or owner_name,
-            organizer_email=owner_email or customer_email
-        )
-        
-        # Send email to OWNER (using dedicated function)
-        owner_email_sent = False
-        if owner_email:
-            owner_email_sent = await mail_obj.send_owner_appointment_notification(
-                owner_email=owner_email,
-                owner_name=owner_name,
-                customer_name=customer_name,
-                customer_email=customer_email,
-                customer_phone=customer_phone,
-                appointment_date=appointment_date,
-                start_time=start_time,
-                end_time=end_time,
-                title=title,
-                description=description
-            )
+        # 1. Try to fetch from Google Calendar
+        try:
+            credentials = db.get_google_credentials(user_id)
             
-            logging.info(
-                f" Appointment emails sent - "
-                f"Customer: {customer_email_sent}, Owner: {owner_email_sent}"
-            )
-        else:
-            logging.warning(f" No owner_email for agent {user_id}, skipping owner notification")
+            if credentials:
+                logging.info(f"Fetching Google Calendar appointments for user {user_id}")
+                gcal = GoogleCalendarService(credentials)
+                
+                # Parse date or use today
+                if from_date:
+                    target_date = datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc)
+                else:
+                    target_date = datetime.now(timezone.utc)
+                
+                # Get events for the next 30 days from target date
+                start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                end_date = start_of_day + timedelta(days=30)
+                
+                google_events = gcal.list_events(time_min=start_of_day, time_max=end_date, max_results=100)
+                
+                # Format Google Calendar events
+                for event in google_events:
+                    all_appointments.append({
+                        "id": event["id"],
+                        "date": event["date"],
+                        "start_time": event["start_time"],
+                        "end_time": event["end_time"],
+                        "attendee_name": event.get("location", ""),
+                        "attendee_email": "",
+                        "title": event["summary"],
+                        "description": event.get("description", ""),
+                        "status": "Scheduled",
+                        "source": "google_calendar"
+                    })
+                
+                # Update credentials if refreshed
+                updated_creds = gcal.get_updated_credentials()
+                if updated_creds['access_token'] != credentials['access_token']:
+                    db.save_google_credentials(user_id, **updated_creds)
+                    logging.info(f"🔄 Refreshed Google credentials for user {user_id}")
+                
+                logging.info(f"✅ Fetched {len(google_events)} appointments from Google Calendar")
+            else:
+                logging.info(f"User {user_id} does not have Google Calendar connected")
+        
+        except Exception as google_error:
+            logging.error(f"Google Calendar error: {google_error}")
+            traceback.print_exc()
+        
+        # 2. Also fetch from local database
+        try:
+            local_appointments = db.get_user_appointments(user_id, from_date)
+            
+            # Format local appointments to match response structure
+            for apt in local_appointments:
+                # Parse scheduled_time to extract date and time
+                scheduled_time = apt.get("scheduled_time", "")
+                if scheduled_time:
+                    if isinstance(scheduled_time, str):
+                        dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
+                    else:
+                        dt = scheduled_time
+                    
+                    all_appointments.append({
+                        "id": apt["id"],
+                        "date": dt.date().isoformat(),
+                        "start_time": dt.time().strftime('%H:%M'),
+                        "end_time": "",  # Local DB doesn't store end_time separately
+                        "attendee_name": apt.get("customer_name", ""),
+                        "attendee_email": "",
+                        "title": "Appointment",
+                        "description": apt.get("notes", ""),
+                        "status": apt.get("status", "Scheduled"),
+                        "source": "local_database"
+                    })
+            
+            logging.info(f"✅ Fetched {len(local_appointments)} appointments from local database")
+        
+        except Exception as db_error:
+            logging.error(f"Database error: {db_error}")
+            traceback.print_exc()
+        
+        # 3. Sort all appointments by date and time
+        all_appointments.sort(key=lambda x: (x["date"], x["start_time"]))
         
         return JSONResponse({
             "success": True,
-            "message": "Appointment booked successfully",
-            "emails_sent": {
-                "customer": customer_email_sent,
-                "owner": owner_email_sent
-            }
+            "user_id": user_id,
+            "appointments": all_appointments,
+            "count": len(all_appointments)
         })
         
     except Exception as e:
-        logging.error(f"Error booking appointment: {e}")
+        logging.error(f"Error fetching appointments: {e}")
         traceback.print_exc()
-        return error_response(f"Failed to book appointment: {str(e)}", status_code=500)
-    
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+@router.post("/agent/book-appointment")
+async def book_appointment(request: Request):
+    try:
+        data = await request.json()
+        
+        user_id = data.get("user_id")
+        appointment_date = data.get("appointment_date")
+        start_time = data.get("start_time")
+        end_time = data.get("end_time")
+        title = data.get("title", "Appointment")
+        description = data.get("description", "")
+        attendee_name = data.get("attendee_name", "")
+        organizer_email = data.get("organizer_email")
+        organizer_name = data.get("organizer_name", "")
+        notes = data.get("notes", "")
+        phone_number = data.get("phone_number")
+        
+        logging.info(f"Booking appointment for user {user_id}: {appointment_date} {start_time}-{end_time}")
+        
+        if not all([user_id, appointment_date, start_time, end_time]):
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Missing required fields"}
+            )
+        
+        google_event_id = None
+        google_success = False
+        
+        try:
+            credentials = db.get_google_credentials(user_id)
+            
+            if credentials:
+                logging.info("User has Google Calendar connected")
+                
+                from services.google_calendar_service import GoogleCalendarService
+                gcal = GoogleCalendarService(credentials)
+                
+                date_obj = datetime.fromisoformat(appointment_date)
+                start_hour, start_min = map(int, start_time.split(':'))
+                end_hour, end_min = map(int, end_time.split(':'))
+                
+                start_datetime = date_obj.replace(hour=start_hour, minute=start_min, tzinfo=timezone.utc)
+                end_datetime = date_obj.replace(hour=end_hour, minute=end_min, tzinfo=timezone.utc)
+                
+                # Check availability before booking
+                is_available = gcal.check_availability(start_datetime, end_datetime)
+                
+                if not is_available:
+                    logging.warning(f"⚠️ Time slot conflict for user {user_id} on {appointment_date} {start_time}-{end_time}")
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "success": False,
+                            "message": "Time slot already booked in Google Calendar",
+                            "conflict": True
+                        }
+                    )
+                
+                attendees = [organizer_email] if organizer_email else []
+                
+                full_description = description
+                if notes:
+                    full_description += f"\n\nNotes: {notes}"
+                
+                event = gcal.create_event(
+                    summary=title,
+                    start_datetime=start_datetime,
+                    end_datetime=end_datetime,
+                    description=full_description,
+                    location=attendee_name,
+                    attendees=attendees
+                )
+                
+                google_event_id = event["id"]
+                google_success = True
+                
+                logging.info(f"Google Calendar event created: {google_event_id}")
+                
+                updated_creds = gcal.get_updated_credentials()
+                if updated_creds['access_token'] != credentials['access_token']:
+                    db.save_google_credentials(user_id, **updated_creds)
+            else:
+                logging.warning("User does not have Google Calendar connected")
+        
+        except Exception as google_error:
+            logging.error(f"Google Calendar error: {google_error}")
+            traceback.print_exc()
+        
+        try:
+            # Combine date and time into scheduled_time
+            scheduled_datetime = f"{appointment_date} {start_time}"
+            
+            appointment_id = db.create_appointment({
+                'user_id': user_id,
+                'call_id': None,
+                'customer_name': attendee_name,
+                'scheduled_time': scheduled_datetime,
+                'notes': f"{title}\n{description}" + (f"\n\nNotes: {notes}" if notes else ""),
+                'status': 'Scheduled'
+            })
+            
+            logging.info(f"Appointment saved to database: ID {appointment_id}")
+            
+            if phone_number:
+                try:
+                    sms_sent = send_appointment_confirmation_sms(
+                        phone_number=phone_number,
+                        appointment_date=appointment_date,
+                        start_time=start_time,
+                        title=title,
+                        attendee_name=attendee_name
+                    )
+                    if sms_sent:
+                        logging.info(f"SMS confirmation sent to {phone_number}")
+                except Exception as sms_error:
+                    logging.error(f"SMS failed: {sms_error}")
+            
+            response = {
+                "success": True,
+                "message": "Appointment booked successfully",
+                "appointment_id": appointment_id,
+            }
+            
+            if google_success:
+                response["google_event_id"] = google_event_id
+                response["google_calendar"] = True
+            else:
+                response["google_calendar"] = False
+                response["note"] = "Saved locally"
+            
+            return JSONResponse(content=response)
+            
+        except Exception as db_error:
+            logging.error(f"Database error: {db_error}")
+            traceback.print_exc()
+            
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "message": f"Failed to save appointment: {str(db_error)}"}
+            )
+        
+    except Exception as e:
+        logging.error(f"Error in book_appointment: {e}")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Failed to book appointment: {str(e)}"}
+        )
 
 @router.post("/forgot-password")
 async def forgot_password(request: ForgotPasswordRequest):
