@@ -55,8 +55,10 @@ class PGDB:
         self.create_appointments_table()
         self.create_user_agent_status_table()
         self.create_google_credentials_table()
+        self.create_outlook_credentials_table()
         self.ensure_agent_schema_migration()
         self.ensure_user_schema_migration()
+
 
     def get_connection(self):
         """Get connection from pool"""
@@ -262,7 +264,7 @@ class PGDB:
                         conn.commit()
                         logging.info(" business_details_submitted column ADDED successfully")
                     else:
-                        logging.info("ℹ business_details_submitted column already exists (skipping)")
+                        logging.info(" business_details_submitted column already exists (skipping)")
                     
                     # Check for is_check column
                     cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='is_check'")
@@ -522,6 +524,7 @@ class PGDB:
         Get paginated list of all users with optional search.
         Supports search by username or email.
         Returns user info WITHOUT password_hash for security.
+        Includes agent_name and is_check (onboarding status).
         """
         with self.get_connection_context() as conn:
             try:
@@ -531,12 +534,12 @@ class PGDB:
                     params = []
                     
                     if search:
-                        where_clause = "WHERE username ILIKE %s OR email ILIKE %s"
+                        where_clause = "WHERE u.username ILIKE %s OR u.email ILIKE %s"
                         search_pattern = f"%{search}%"
                         params = [search_pattern, search_pattern]
                     
                     # Count total records
-                    count_query = f"SELECT COUNT(*) FROM users {where_clause}"
+                    count_query = f"SELECT COUNT(*) FROM users u {where_clause}"
                     cursor.execute(count_query, tuple(params))
                     total = cursor.fetchone()["count"]
                     
@@ -544,12 +547,22 @@ class PGDB:
                     offset = (page - 1) * page_size
                     total_pages = (total + page_size - 1) // page_size
                     
-                    # Get paginated users
+                    # Get paginated users with agent info
                     query = f"""
-                        SELECT id, username, email, first_name, last_name, is_admin, created_at
-                        FROM users
+                        SELECT 
+                            u.id, 
+                            u.username, 
+                            u.email, 
+                            u.first_name, 
+                            u.last_name, 
+                            u.is_admin, 
+                            u.is_check,
+                            u.created_at,
+                            a.agent_name
+                        FROM users u
+                        LEFT JOIN agents a ON u.id = a.user_id
                         {where_clause}
-                        ORDER BY created_at DESC
+                        ORDER BY u.created_at DESC
                         LIMIT %s OFFSET %s
                     """
                     params.extend([page_size, offset])
@@ -784,7 +797,7 @@ class PGDB:
     #     with self.get_connection_context() as conn:
     #         try:
     #             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-    #                 # 🔍 Verify agent exists and belongs to admin
+    #                 #  Verify agent exists and belongs to admin
     #                 cursor.execute("""
     #                     SELECT id, admin_id, is_active
     #                     FROM agents
@@ -798,7 +811,7 @@ class PGDB:
     #                 if agent["admin_id"] != admin_id:
     #                     raise ValueError("Access denied: You do not own this agent")
 
-    #                 # 🔄 Update global status
+    #                 #  Update global status
     #                 cursor.execute("""
     #                     UPDATE agents
     #                     SET is_active = %s,
@@ -1935,7 +1948,7 @@ class PGDB:
                     """, (hashed_password.decode('utf-8'), email))
                     
                     conn.commit()
-                    logging.info(f"✅ Password updated for {email}")
+                    logging.info(f" Password updated for {email}")
                     return True
             except Exception as e:
                 conn.rollback()
@@ -2421,7 +2434,7 @@ class PGDB:
                         ON google_credentials(user_id);
                     """)
                 conn.commit()
-                logging.info("✅ google_credentials table created")
+                logging.info(" google_credentials table created")
             except Exception as e:
                 logging.error(f"Error creating google_credentials table: {e}")
 
@@ -2456,7 +2469,7 @@ class PGDB:
                     """, (user_id, access_token, refresh_token, token_expiry, scopes))
                     result = cursor.fetchone()
                 conn.commit()
-                logging.info(f"✅ Saved Google credentials for user {user_id}")
+                logging.info(f" Saved Google credentials for user {user_id}")
                 return result
             except Exception as e:
                 conn.rollback()
@@ -2511,15 +2524,142 @@ class PGDB:
                 conn.commit()
                 
                 if result:
-                    logging.info(f"✅ Deleted Google credentials for user {user_id}")
+                    logging.info(f"Deleted Google credentials for user {user_id}")
                     return True
                 else:
-                    logging.warning(f"⚠️ No Google credentials found for user {user_id}")
+                    logging.warning(f"No Google credentials found for user {user_id}")
                     return False
             except Exception as e:
                 conn.rollback()
                 logging.error(f"Error deleting Google credentials: {e}")
+                return False
+
+    # ==================== Outlook Credentials Methods ====================
+    
+    def create_outlook_credentials_table(self):
+        """
+        Create outlook_credentials table to store OAuth tokens.
+        One credential set per user (UNIQUE constraint on user_id).
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS outlook_credentials (
+                            id SERIAL PRIMARY KEY,
+                            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                            access_token TEXT NOT NULL,
+                            refresh_token TEXT,
+                            token_expiry TIMESTAMPTZ,
+                            scopes TEXT,
+                            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(user_id)
+                        );
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_outlook_credentials_user_id 
+                        ON outlook_credentials(user_id);
+                    """)
+                conn.commit()
+                logging.info("outlook_credentials table created")
+            except Exception as e:
+                logging.error(f"Error creating outlook_credentials table: {e}")
+
+    def save_outlook_credentials(self, user_id: int, access_token: str, refresh_token: str = None, 
+                                token_expiry: datetime = None, scopes: str = None):
+        """
+        Save or update Outlook OAuth credentials for a user (upsert).
+        
+        Args:
+            user_id: User ID
+            access_token: OAuth access token
+            refresh_token: OAuth refresh token (optional)
+            token_expiry: Token expiration datetime (optional)
+            scopes: Comma-separated OAuth scopes (optional)
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute("""
+                        INSERT INTO outlook_credentials (
+                            user_id, access_token, refresh_token, token_expiry, scopes, updated_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id) 
+                        DO UPDATE SET
+                            access_token = EXCLUDED.access_token,
+                            refresh_token = EXCLUDED.refresh_token,
+                            token_expiry = EXCLUDED.token_expiry,
+                            scopes = EXCLUDED.scopes,
+                            updated_at = CURRENT_TIMESTAMP
+                        RETURNING *;
+                    """, (user_id, access_token, refresh_token, token_expiry, scopes))
+                    result = cursor.fetchone()
+                conn.commit()
+                logging.info(f"Saved Outlook credentials for user {user_id}")
+                return result
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error saving Outlook credentials: {e}")
                 raise
+
+    def get_outlook_credentials(self, user_id: int):
+        """
+        Get Outlook OAuth credentials for a user.
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            Dict with access_token, refresh_token, token_expiry, scopes or None
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        access_token,
+                        refresh_token,
+                        token_expiry,
+                        scopes
+                    FROM outlook_credentials
+                    WHERE user_id = %s
+                """, (user_id,))
+                result = cursor.fetchone()
+                
+                if result and result.get("token_expiry"):
+                    result["token_expiry"] = result["token_expiry"].isoformat()
+                
+                return result
+
+    def delete_outlook_credentials(self, user_id: int):
+        """
+        Delete Outlook OAuth credentials for a user (disconnect).
+        
+        Args:
+            user_id: User ID
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        DELETE FROM outlook_credentials
+                        WHERE user_id = %s
+                        RETURNING id;
+                    """, (user_id,))
+                    result = cursor.fetchone()
+                conn.commit()
+                
+                if result:
+                    logging.info(f"Deleted Outlook credentials for user {user_id}")
+                    return True
+                else:
+                    logging.warning(f"No Outlook credentials found for user {user_id}")
+                    return False
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error deleting Outlook credentials: {e}")
+                return False
 
     def create_google_appointment(self, user_id: int, appointment_date: str, start_time: str, 
                                   end_time: str, attendee_email: str, attendee_name: str = None,
@@ -2558,7 +2698,7 @@ class PGDB:
                     ))
                     result = cursor.fetchone()
                 conn.commit()
-                logging.info(f"✅ Created Google appointment {result['id']} for user {user_id}")
+                logging.info(f" Created Google appointment {result['id']} for user {user_id}")
                 return result
             except Exception as e:
                 conn.rollback()
@@ -2652,5 +2792,22 @@ class PGDB:
                         apt["updated_at"] = apt["updated_at"].isoformat()
                 
                 return appointments
+                
+                
+                
+    def get_voice_samples_by_language(self, language: str):
+          """Get voice samples filtered by language"""
+          with self.get_connection_context() as conn:  # ? CHANGED THIS LINE
+              with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                  cursor.execute("""
+                      SELECT 
+                          id, voice_name, voice_id, language, 
+                          country_code, gender, audio_blob_path,
+                          duration_seconds, created_at
+                      FROM voice_samples
+                      WHERE language = %s
+                       ORDER BY voice_name
+                  """, (language,))
+                  return cursor.fetchall()
 
 

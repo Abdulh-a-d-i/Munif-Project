@@ -9,7 +9,8 @@ import json
 import base64
 import httpx
 import traceback
-from datetime import datetime, timezone  
+import asyncio
+from datetime import datetime, timezone, timedelta  
 
 from src.utils.db import PGDB
 
@@ -327,12 +328,12 @@ def check_if_answered(events_log) -> bool:
         # Either condition means call was answered
         answered = egress_started or sip_participant_joined
         
-        logging.info(f" Answered check: egress={egress_started}, sip_joined={sip_participant_joined} → {answered}")
+        logging.info(f" Answered check: egress={egress_started}, sip_joined={sip_participant_joined}  {answered}")
         
         return answered
         
     except Exception as e:
-        logging.error(f"❌ Error parsing events_log: {e}")
+        logging.error(f" Error parsing events_log: {e}")
         return False
     
 
@@ -489,3 +490,50 @@ def serialize_agent_data(agent: dict) -> dict:
         agent[key] = convert_value(value)
     
     return agent
+
+async def fetch_calendar_events_for_agent(agent_id: int):
+    try:
+        agent = await asyncio.to_thread(db.get_agent_by_id, agent_id)
+        if not agent:
+            logging.warning(f"Agent {agent_id} not found")
+            return None
+        
+        user_id = agent.get('user_id') or agent.get('admin_id')
+        if not user_id:
+            logging.info(f"No user associated with agent {agent_id}")
+            return None
+        
+        credentials = await asyncio.to_thread(db.get_google_credentials, user_id)
+        if not credentials:
+            logging.info(f"No Google credentials for user {user_id}")
+            return None
+        
+        from services.google_calendar_service import GoogleCalendarService
+        
+        def _fetch_events():
+            calendar_service = GoogleCalendarService(credentials)
+            time_min = datetime.now(timezone.utc)
+            time_max = datetime.now(timezone.utc) + timedelta(days=30)
+            events = calendar_service.list_events(time_min=time_min, time_max=time_max, max_results=100)
+            updated_creds = calendar_service.get_updated_credentials()
+            return events, updated_creds
+        
+        events, updated_creds = await asyncio.to_thread(_fetch_events)
+        
+        if updated_creds['access_token'] != credentials['access_token']:
+            await asyncio.to_thread(
+                db.save_google_credentials,
+                user_id=user_id,
+                access_token=updated_creds['access_token'],
+                refresh_token=updated_creds['refresh_token'],
+                token_expiry=updated_creds['token_expiry'],
+                scopes=updated_creds.get('scopes')
+            )
+        
+        logging.info(f"Fetched {len(events)} calendar events for agent {agent_id}")
+        return events
+        
+    except Exception as e:
+        logging.error(f"Error fetching calendar for agent {agent_id}: {e}")
+        traceback.print_exc()
+        return None

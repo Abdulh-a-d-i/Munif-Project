@@ -65,22 +65,22 @@ def login_user(user: UserLogin):
     """
     try:
         logging.info(f"Login request received")
-        logging.info(f"📧 Email: {user.email}")
-        logging.info(f"🔑 Password length: {len(user.password) if user.password else 0}")
+        logging.info(f" Email: {user.email}")
+        logging.info(f" Password length: {len(user.password) if user.password else 0}")
         
         user_dict = {
             "email": user.email,
             "password": user.password
         }
-        logging.info(f"📦 User dict created: {user_dict}")
+        logging.info(f" User dict created: {user_dict}")
         user_dict["email"] = user_dict["email"].strip().lower()
         
         result = db.login_user(user_dict)
         if not result:
-            logging.warning(f"❌ Login failed for {user_dict['email']}")
+            logging.warning(f" Login failed for {user_dict['email']}")
             return error_response("Invalid username or password", status_code=422)
         
-        logging.info(f"✅ Login successful for {user_dict['email']}")
+        logging.info(f" Login successful for {user_dict['email']}")
         
         # Check if user has submitted business details to determine onboarding status
         user_id = result["id"]
@@ -91,7 +91,7 @@ def login_user(user: UserLogin):
         # onboard = false -> business details NOT submitted (is_check = false, user needs to submit)
         onboard = is_check
         
-        logging.info(f"👤 User {user_id} is_check: {is_check}, onboard: {onboard}")
+        logging.info(f" User {user_id} is_check: {is_check}, onboard: {onboard}")
         
         # Format user data for JSON response
         user_data = {
@@ -111,20 +111,22 @@ def login_user(user: UserLogin):
             "access_token": token,
             "token_type": "bearer",
             "user": user_data,
-            "onboard": onboard
+            "onboard": onboard,  # Legacy field - kept for backwards compatibility
+            "onboarding_completed": is_check,  # Explicit boolean for onboarding form status
+            "is_check": is_check  # Raw database value
         }
         
-        logging.info(f"📤 Login response: {response}")
+        logging.info(f" Login response: {response}")
         
         return JSONResponse(
             status_code=200,
             content=response
         )
     except ValueError as ve:
-        logging.error(f"❌ ValueError during login: {str(ve)}")
+        logging.error(f" ValueError during login: {str(ve)}")
         return error_response(str(ve), status_code=422)
     except Exception as e:
-        logging.error(f"❌ Error during login: {str(e)}")
+        logging.error(f" Error during login: {str(e)}")
         traceback.print_exc()
         return error_response(f"Internal server error: {str(e)}", status_code=500)
 
@@ -174,7 +176,7 @@ async def submit_business_details(
         # Mark business details as submitted
         db.mark_business_details_submitted(user_id)
         
-        logging.info(f"✅ Business details submitted successfully for user {user_email}")
+        logging.info(f" Business details submitted successfully for user {user_email}")
         
         return JSONResponse(
             status_code=200,
@@ -215,7 +217,7 @@ async def get_user_profile(current_user: dict = Depends(get_current_user)):
                 # Get phone number from first agent
                 phone_number = agents[0].get("phone_number")
         except Exception as e:
-            logging.warning(f"⚠️ Error fetching agent phone number: {e}")
+            logging.warning(f" Error fetching agent phone number: {e}")
         
         return JSONResponse(
             status_code=200,
@@ -233,6 +235,140 @@ async def get_user_profile(current_user: dict = Depends(get_current_user)):
         logging.error(f"Error fetching user profile: {str(e)}")
         traceback.print_exc()
         return error_response("Failed to fetch user profile", 500)
+
+
+@router.get("/calls")
+async def get_user_all_calls(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, le=100),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get call history for ALL agents owned by the authenticated user.
+    Returns combined calls from all agents with pagination.
+    """
+    try:
+        from fastapi.encoders import jsonable_encoder
+        from src.api.router import add_presigned_urls_to_call
+        
+        user_id = current_user["id"]
+        is_admin = current_user.get("is_admin", False)
+        
+        # Get all agents for this user
+        if is_admin:
+            agents = db.get_agents_by_admin(user_id)
+        else:
+            agents = db.get_agents_for_user(user_id)
+        
+        if not agents:
+            return JSONResponse(content=jsonable_encoder({
+                "success": True,
+                "user_id": user_id,
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total": 0,
+                    "completed_calls": 0,
+                    "not_completed_calls": 0
+                },
+                "calls": []
+            }))
+        
+        # Collect all calls from all agents
+        all_calls = []
+        total_count = 0
+        completed_count = 0
+        not_completed_count = 0
+        
+        for agent in agents:
+            agent_id = agent["id"]
+            # Get all calls for this agent
+            history = db.get_call_history_by_agent(agent_id, page=1, page_size=1000)
+            
+            for call in history.get("calls", []):
+                call_data = {**call}
+                
+                # Add agent info to each call
+                call_data["agent_id"] = agent_id
+                call_data["agent_name"] = agent.get("agent_name")
+                call_data["agent_phone"] = agent.get("phone_number")
+                
+                # Format timestamps
+                for field in ["created_at", "started_at", "ended_at"]:
+                    if call.get(field):
+                        if isinstance(call[field], datetime):
+                            call_data[field] = call[field].isoformat()
+                        else:
+                            call_data[field] = str(call[field])
+                
+                # Calculate duration if missing
+                if not call_data.get("duration") and call.get("started_at") and call.get("ended_at"):
+                    try:
+                        start = call["started_at"] if isinstance(call["started_at"], datetime) else datetime.fromisoformat(str(call["started_at"]))
+                        end = call["ended_at"] if isinstance(call["ended_at"], datetime) else datetime.fromisoformat(str(call["ended_at"]))
+                        call_data["duration"] = round((end - start).total_seconds(), 1)
+                    except:
+                        call_data["duration"] = 0
+                
+                # Parse transcript
+                transcript_text = None
+                if call.get("transcript"):
+                    try:
+                        tr = call["transcript"]
+                        if isinstance(tr, str):
+                            tr = json.loads(tr)
+                        if isinstance(tr, list):
+                            lines = []
+                            for msg in tr:
+                                if msg.get("type") == "message":
+                                    speaker = "Assistant" if msg.get("role") == "assistant" else "User"
+                                    content = msg.get("content", "")
+                                    text = " ".join(content) if isinstance(content, list) else str(content)
+                                    lines.append(f"{speaker}: {text}")
+                            transcript_text = "\n".join(lines)
+                    except Exception as e:
+                        logging.warning(f"Transcript parse error: {e}")
+                
+                call_data["transcript_text"] = transcript_text
+                call_data["has_recording"] = bool(call.get("recording_blob"))
+                
+                # Presigned URLs for recordings/assets
+                call_data = add_presigned_urls_to_call(call_data)
+                
+                all_calls.append(call_data)
+            
+            # Aggregate stats
+            total_count += history.get("total", 0)
+            completed_count += history.get("completed_calls", 0)
+            not_completed_count += history.get("not_completed_calls", 0)
+        
+        # Sort all calls by created_at descending
+        all_calls.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        
+        # Apply pagination to combined results
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_calls = all_calls[start_idx:end_idx]
+        
+        return JSONResponse(content=jsonable_encoder({
+            "success": True,
+            "user_id": user_id,
+            "agent_count": len(agents),
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total_count,
+                "completed_calls": completed_count,
+                "not_completed_calls": not_completed_count
+            },
+            "calls": paginated_calls
+        }))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error fetching user calls: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/dashboard/overview")
@@ -868,10 +1004,10 @@ async def update_user_agent(
                     hetzner_storage.delete_avatar(old_avatar_key)
                 
                 updates["avatar_url"] = new_avatar_key
-                logging.info(f"✅ Avatar updated: {new_avatar_key}")
+                logging.info(f" Avatar updated: {new_avatar_key}")
                 
             except Exception as e:
-                logging.error(f"❌ Avatar upload failed: {e}")
+                logging.error(f" Avatar upload failed: {e}")
                 return error_response("Failed to upload avatar", 500)
         
         if not updates:

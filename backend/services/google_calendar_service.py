@@ -54,16 +54,16 @@ class GoogleCalendarService:
         self.service = build('calendar', 'v3', credentials=self.credentials)
         
         self.service = build('calendar', 'v3', credentials=self.credentials)
-        logger.info("✅ Google Calendar service initialized")
+        logger.info(" Google Calendar service initialized")
 
     def _refresh_if_needed(self):
         """Refresh token if expired."""
         if self.credentials and self.credentials.expired and self.credentials.refresh_token:
             try:
                 self.credentials.refresh(Request())
-                logger.info("🔄 Access token refreshed")
+                logger.info(" Access token refreshed")
             except Exception as e:
-                logger.error(f"❌ Token refresh failed: {e}")
+                logger.error(f" Token refresh failed: {e}")
                 raise
 
     def list_events(
@@ -120,14 +120,14 @@ class GoogleCalendarService:
                     'location': event.get('location', '')
                 })
             
-            logger.info(f"✅ Fetched {len(formatted_events)} events")
+            logger.info(f" Fetched {len(formatted_events)} events")
             return formatted_events
             
         except HttpError as e:
-            logger.error(f"❌ HTTP error fetching events: {e}")
+            logger.error(f" HTTP error fetching events: {e}")
             raise
         except Exception as e:
-            logger.error(f"❌ Error fetching events: {e}")
+            logger.error(f" Error fetching events: {e}")
             raise
 
     def check_availability(self, start_datetime: datetime, end_datetime: datetime) -> bool:
@@ -152,14 +152,14 @@ class GoogleCalendarService:
             ).execute()
             
             conflicting = len(events.get('items', [])) > 0
-            logger.info(f"✅ Availability check: {'available' if not conflicting else 'conflict'}")
+            logger.info(f" Availability check: {'available' if not conflicting else 'conflict'}")
             return not conflicting
             
         except HttpError as e:
-            logger.error(f"❌ HTTP error checking availability: {e}")
+            logger.error(f" HTTP error checking availability: {e}")
             raise
         except Exception as e:
-            logger.error(f"❌ Error checking availability: {e}")
+            logger.error(f" Error checking availability: {e}")
             raise
 
     def create_event(

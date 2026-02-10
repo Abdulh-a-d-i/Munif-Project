@@ -119,16 +119,25 @@ async def get_all_users_admin(
     """
     Get paginated list of all users (admin only).
     Supports search by username or email.
+    Includes agent name and onboarding status for each user.
     
     Requires: Admin authentication
     """
     try:
         result = db.get_all_users(page=page, page_size=page_size, search=search)
         
-        # Format created_at timestamps
+        # Format timestamps and add computed fields
         for user in result.get("users", []):
+            # Format timestamp
             if user.get("created_at"):
                 user["created_at"] = user["created_at"].isoformat() if hasattr(user["created_at"], 'isoformat') else str(user["created_at"])
+            
+            # Add onboarding status as boolean
+            user["onboarding_completed"] = bool(user.get("is_check", False))
+            
+            # Agent name already included from LEFT JOIN, will be None if no agent
+            if not user.get("agent_name"):
+                user["agent_name"] = None
         
         return JSONResponse(
             status_code=200,
@@ -142,6 +151,87 @@ async def get_all_users_admin(
         logging.error(f"Error fetching users: {str(e)}")
         traceback.print_exc()
         return error_response(f"Failed to fetch users: {str(e)}", status_code=500)
+
+
+@router.post("/admin/create-user")
+async def create_user_by_admin(
+    email: str,
+    username: str,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+    current_user: dict = Depends(require_admin)
+):
+    """
+    Admin endpoint to create a new user account.
+    Generates a temporary password and sends welcome email to the new user.
+    
+    Requires: Admin authentication
+    Returns: Created user info (password not included in response for security)
+    """
+    try:
+        import secrets
+        import string
+        
+        # Generate secure temporary password
+        # 12 characters with mix of uppercase, lowercase, digits, and special chars
+        alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+        temp_password = ''.join(secrets.choice(alphabet) for _ in range(12))
+        
+        # Clean and validate email
+        email = email.strip().lower()
+        username = username.strip().lower()
+        
+        # Create user in database
+        user_data = {
+            "email": email,
+            "username": username,
+            "password": temp_password,
+            "is_admin": False
+        }
+        
+        try:
+            created_user = db.register_user(user_data)
+        except ValueError as e:
+            # Email already exists
+            return error_response(str(e), status_code=400)
+        
+        # Send welcome email with credentials
+        login_url = os.getenv("FRONTEND_URL", "https://mrbot-ki.de") + "/login"
+        display_name = first_name or username
+        
+        email_sent = await mail_obj.send_welcome_email(
+            user_email=email,
+            user_name=display_name,
+            temp_password=temp_password,
+            login_url=login_url
+        )
+        
+        if not email_sent:
+            logging.warning(f" User created but email failed for {email}")
+            # Still return success since user was created
+        
+        logging.info(f" Admin {current_user['email']} created user: {email}")
+        
+        return JSONResponse(
+            status_code=201,
+            content={
+                "success": True,
+                "message": f"User account created successfully. Welcome email sent to {email}",
+                "user": {
+                    "id": created_user["id"],
+                    "username": created_user["username"],
+                    "email": created_user["email"],
+                    "created_at": created_user["created_at"].isoformat() if hasattr(created_user.get("created_at"), 'isoformat') else str(created_user.get("created_at"))
+                },
+                "temp_password": temp_password,  # Include password for admin to share with user
+                "email_sent": email_sent
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f" Error creating user: {str(e)}")
+        traceback.print_exc()
+        return error_response(f"Failed to create user: {str(e)}", status_code=500)
 
 
 @router.get("/users/list")
@@ -462,13 +552,13 @@ async def save_call_data(request: Request):
     This receives:
     - transcript_blob: Path in Hetzner bucket
     - recording_blob: Path in Hetzner bucket
-    - call_duration_seconds: ACCURATE duration from agent (SIP participant join â†’ leave)
+    - call_duration_seconds: ACCURATE duration from agent (SIP participant join  leave)
     - agent_id: To update used_minutes
     
     Backend will:
     1. Store paths + duration in DB
     2. Update agent's used_minutes (accumulative)
-    3. Download transcript after 5s delay â†’ Store JSONB in DB
+    3. Download transcript after 5s delay  Store JSONB in DB
     """
     try:
         data = await request.json()
@@ -544,7 +634,7 @@ async def save_call_data(request: Request):
                 
                 logging.info(
                     f" Agent {agent_id} minutes updated: "
-                    f"{old_used:.2f} â†’ {new_used:.2f} min "
+                    f"{old_used:.2f}  {new_used:.2f} min "
                     f"(+{duration_minutes:.2f} min from call {call_id})"
                 )
                 
@@ -585,9 +675,9 @@ async def get_agent_call_history(
     agent_id: int,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, le=100),
-    user=Depends(get_current_user)  # Any authenticated user can now enter
+    user=Depends(get_current_user)
 ):
-    """Get call history for a specific agent (Global Authenticated Access)"""
+    """Get call history for a specific agent"""
     try:
         agent = db.get_agent_by_id(agent_id)
         
@@ -617,7 +707,7 @@ async def get_agent_call_history(
                 except:
                     call_data["duration"] = 0
             
-            # Parse transcript logic remains the same
+            # Parse transcript
             transcript_text = None
             if call.get("transcript"):
                 try:
@@ -665,23 +755,32 @@ async def get_agent_call_history(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/agent/config/{phone_number}")
 async def get_agent_config(phone_number: str):
     """
-    Fetch agent configuration by phone number.
-    Checks minutes availability - blocks if exhausted.
-    Does NOT send minutes info to agent (security)
+    Fetch agent configuration by phone number with calendar events.
+    Fetches calendar in parallel to minimize latency.
     """
     try:
         agent = db.get_agent_by_phone(phone_number)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         
-        # Check if agent has available minutes
         agent_id = agent.get("agent_id")
-        minutes_check = db.check_agent_minutes_available(agent_id)
         
-        # Block if no minutes remaining
+        minutes_task = asyncio.create_task(
+            asyncio.to_thread(db.check_agent_minutes_available, agent_id)
+        )
+        
+        from src.utils.utils import fetch_calendar_events_for_agent
+        calendar_task = asyncio.create_task(fetch_calendar_events_for_agent(agent_id))
+        
+        minutes_check, calendar_events = await asyncio.gather(
+            minutes_task,
+            calendar_task
+        )
+        
         if not minutes_check["available"]:
             logging.warning(
                 f" Agent {agent_id} ({phone_number}): "
@@ -692,7 +791,6 @@ async def get_agent_config(phone_number: str):
                 detail="Agent minutes exhausted"
             )
         
-        # Minutes available - send config WITHOUT minutes info
         logging.info(
             f" Agent {agent_id} config sent - "
             f"{minutes_check['remaining_minutes']:.1f} minutes remaining"
@@ -701,7 +799,8 @@ async def get_agent_config(phone_number: str):
 
         return JSONResponse({
             "success": True,
-            "agent": agent
+            "agent": agent,
+            "calendar_events": calendar_events or []
         })
         
     except HTTPException:
@@ -1333,7 +1432,7 @@ async def delete_agent(
 #     Admin-only: Activate or deactivate an agent globally.
 #     """
 #     try:
-#         # ðŸ” Admin check (strict)
+#         #  Admin check (strict)
 #         is_admin = current_user.get("is_admin") or current_user.get("role") == "admin"
 #         if not is_admin:
 #             return error_response("Unauthorized: Only admins can toggle agent status", 403)
@@ -1562,6 +1661,16 @@ async def get_appointments(user_id: int, from_date: str = None):
         from services.google_calendar_service import GoogleCalendarService
         
         all_appointments = []
+        user_id = data.get("user_id")  # This is agent_id
+        appointment_date = data.get("appointment_date") 
+        start_time = data.get("start_time") 
+        end_time = data.get("end_time")
+        customer_name = data.get("customer_name", "Valued Customer")
+        customer_email = data.get("customer_email")
+        customer_phone = data.get("customer_phone")
+        title = data.get("title", "Appointment")
+        description = data.get("description", "")
+        organizer_name = data.get("organizer_name")
         
         # 1. Try to fetch from Google Calendar
         try:
@@ -1602,9 +1711,9 @@ async def get_appointments(user_id: int, from_date: str = None):
                 updated_creds = gcal.get_updated_credentials()
                 if updated_creds['access_token'] != credentials['access_token']:
                     db.save_google_credentials(user_id, **updated_creds)
-                    logging.info(f"🔄 Refreshed Google credentials for user {user_id}")
+                    logging.info(f"?? Refreshed Google credentials for user {user_id}")
                 
-                logging.info(f"✅ Fetched {len(google_events)} appointments from Google Calendar")
+                logging.info(f"? Fetched {len(google_events)} appointments from Google Calendar")
             else:
                 logging.info(f"User {user_id} does not have Google Calendar connected")
         
@@ -1639,7 +1748,7 @@ async def get_appointments(user_id: int, from_date: str = None):
                         "source": "local_database"
                     })
             
-            logging.info(f"✅ Fetched {len(local_appointments)} appointments from local database")
+            logging.info(f"? Fetched {len(local_appointments)} appointments from local database")
         
         except Exception as db_error:
             logging.error(f"Database error: {db_error}")
@@ -1668,94 +1777,160 @@ async def book_appointment(request: Request):
     try:
         data = await request.json()
         
-        user_id = data.get("user_id")
+        agent_id = data.get("user_id")
         appointment_date = data.get("appointment_date")
         start_time = data.get("start_time")
         end_time = data.get("end_time")
         title = data.get("title", "Appointment")
         description = data.get("description", "")
-        attendee_name = data.get("attendee_name", "")
-        organizer_email = data.get("organizer_email")
+        attendee_name = data.get("customer_name", "")
+        organizer_email = data.get("customer_email")
         organizer_name = data.get("organizer_name", "")
         notes = data.get("notes", "")
-        phone_number = data.get("phone_number")
+        phone_number = data.get("customer_phone")
         
-        logging.info(f"Booking appointment for user {user_id}: {appointment_date} {start_time}-{end_time}")
+        logging.info(f"Booking appointment for agent {agent_id}: {appointment_date} {start_time}-{end_time}")
         
-        if not all([user_id, appointment_date, start_time, end_time]):
+        if not all([agent_id, appointment_date, start_time, end_time]):
             return JSONResponse(
                 status_code=400,
                 content={"success": False, "message": "Missing required fields"}
             )
         
-        google_event_id = None
-        google_success = False
+        agent = db.get_agent_by_id(agent_id)
+        if not agent:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "message": "Agent not found"}
+            )
         
-        try:
-            credentials = db.get_google_credentials(user_id)
-            
-            if credentials:
-                logging.info("User has Google Calendar connected")
-                
+        user_id = agent.get('user_id') or agent.get('admin_id')
+        if not user_id:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Agent has no associated user"}
+            )
+        
+        logging.info(f"Resolved agent {agent_id} to user {user_id}")
+        
+        # Parse datetime
+        date_obj = datetime.fromisoformat(appointment_date)
+        start_hour, start_min = map(int, start_time.split(':'))
+        end_hour, end_min = map(int, end_time.split(':'))
+        
+        start_datetime = date_obj.replace(hour=start_hour, minute=start_min, tzinfo=timezone.utc)
+        end_datetime = date_obj.replace(hour=end_hour, minute=end_min, tzinfo=timezone.utc)
+        
+        # Build full description with phone number
+        full_description = description
+        if phone_number:
+            full_description += f"\n\nPhone: {phone_number}"
+        if notes:
+            full_description += f"\n\nNotes: {notes}"
+        
+        attendees_list = [organizer_email] if organizer_email else []
+        
+        # Get credentials from both Google and Outlook tables
+        google_creds = db.get_google_credentials(user_id)
+        outlook_creds = db.get_outlook_credentials(user_id)
+        
+        calendar_services = {}
+        calendar_results = {}
+        
+        # Initialize Google Calendar service
+        if google_creds:
+            try:
                 from services.google_calendar_service import GoogleCalendarService
-                gcal = GoogleCalendarService(credentials)
-                
-                date_obj = datetime.fromisoformat(appointment_date)
-                start_hour, start_min = map(int, start_time.split(':'))
-                end_hour, end_min = map(int, end_time.split(':'))
-                
-                start_datetime = date_obj.replace(hour=start_hour, minute=start_min, tzinfo=timezone.utc)
-                end_datetime = date_obj.replace(hour=end_hour, minute=end_min, tzinfo=timezone.utc)
-                
-                # Check availability before booking
-                is_available = gcal.check_availability(start_datetime, end_datetime)
+                calendar_services['google'] = GoogleCalendarService(google_creds)
+                logging.info("Google Calendar service initialized")
+            except Exception as e:
+                logging.error(f"Error initializing Google calendar service: {e}")
+                calendar_results['google'] = {"status": "error", "error": str(e)}
+        
+        # Initialize Outlook Calendar service
+        if outlook_creds:
+            try:
+                from services.outlook_calendar_service import OutlookCalendarService
+                calendar_services['outlook'] = OutlookCalendarService(outlook_creds)
+                logging.info("Outlook Calendar service initialized")
+            except Exception as e:
+                logging.error(f"Error initializing Outlook calendar service: {e}")
+                calendar_results['outlook'] = {"status": "error", "error": str(e)}
+        
+        # Check availability across ALL calendars
+        for provider, service in calendar_services.items():
+            try:
+                is_available = service.check_availability(start_datetime, end_datetime)
                 
                 if not is_available:
-                    logging.warning(f"⚠️ Time slot conflict for user {user_id} on {appointment_date} {start_time}-{end_time}")
+                    logging.warning(f"Time slot conflict in {provider} Calendar for user {user_id}")
                     return JSONResponse(
                         status_code=409,
                         content={
                             "success": False,
-                            "message": "Time slot already booked in Google Calendar",
-                            "conflict": True
+                            "message": f"Time slot already booked in {provider.capitalize()} Calendar",
+                            "conflict": True,
+                            "provider": provider
                         }
                     )
-                
-                attendees = [organizer_email] if organizer_email else []
-                
-                full_description = description
-                if notes:
-                    full_description += f"\n\nNotes: {notes}"
-                
-                event = gcal.create_event(
+                logging.info(f"{provider.capitalize()} Calendar: slot available")
+            except Exception as e:
+                logging.error(f"Error checking {provider} availability: {e}")
+                # Continue checking other calendars even if one fails
+        
+        # Create events in ALL calendars
+        for provider, service in calendar_services.items():
+            try:
+                event = service.create_event(
                     summary=title,
                     start_datetime=start_datetime,
                     end_datetime=end_datetime,
                     description=full_description,
                     location=attendee_name,
-                    attendees=attendees
+                    attendees=attendees_list
                 )
                 
-                google_event_id = event["id"]
-                google_success = True
+                event_id = event.get("id") if provider == 'google' else event.get("id")
+                calendar_results[provider] = {
+                    "status": "created",
+                    "event_id": event_id
+                }
                 
-                logging.info(f"Google Calendar event created: {google_event_id}")
+                logging.info(f"{provider.capitalize()} Calendar event created: {event_id}")
                 
-                updated_creds = gcal.get_updated_credentials()
-                if updated_creds['access_token'] != credentials['access_token']:
-                    db.save_google_credentials(user_id, **updated_creds)
-            else:
-                logging.warning("User does not have Google Calendar connected")
+                # Update credentials if refreshed
+                updated_creds = service.get_updated_credentials()
+                
+                if provider == 'google':
+                    db.save_google_credentials(
+                        user_id=user_id,
+                        access_token=updated_creds['access_token'],
+                        refresh_token=updated_creds['refresh_token'],
+                        token_expiry=updated_creds['token_expiry'],
+                        scopes=updated_creds.get('scopes')
+                    )
+                elif provider == 'outlook':
+                    db.save_outlook_credentials(
+                        user_id=user_id,
+                        access_token=updated_creds['access_token'],
+                        refresh_token=updated_creds['refresh_token'],
+                        token_expiry=updated_creds['token_expiry'],
+                        scopes=updated_creds.get('scopes')
+                    )
+                
+            except Exception as calendar_error:
+                logging.error(f"{provider.capitalize()} Calendar event creation failed: {calendar_error}")
+                traceback.print_exc()
+                calendar_results[provider] = {
+                    "status": "failed",
+                    "error": str(calendar_error)
+                }
         
-        except Exception as google_error:
-            logging.error(f"Google Calendar error: {google_error}")
-            traceback.print_exc()
-        
+        # Save to database regardless of calendar status
         try:
-            # Combine date and time into scheduled_time
             scheduled_datetime = f"{appointment_date} {start_time}"
             
-            appointment_id = db.create_appointment({
+            appointment_result = db.create_appointment({
                 'user_id': user_id,
                 'call_id': None,
                 'customer_name': attendee_name,
@@ -1764,34 +1939,27 @@ async def book_appointment(request: Request):
                 'status': 'Scheduled'
             })
             
+            appointment_id = appointment_result['id'] if isinstance(appointment_result, dict) else appointment_result
+            
             logging.info(f"Appointment saved to database: ID {appointment_id}")
             
-            if phone_number:
-                try:
-                    sms_sent = send_appointment_confirmation_sms(
-                        phone_number=phone_number,
-                        appointment_date=appointment_date,
-                        start_time=start_time,
-                        title=title,
-                        attendee_name=attendee_name
-                    )
-                    if sms_sent:
-                        logging.info(f"SMS confirmation sent to {phone_number}")
-                except Exception as sms_error:
-                    logging.error(f"SMS failed: {sms_error}")
-            
+            # Build response
             response = {
                 "success": True,
                 "message": "Appointment booked successfully",
-                "appointment_id": appointment_id,
+                "appointment_id": int(appointment_id),
+                "start_datetime": start_datetime.isoformat(),
+                "end_datetime": end_datetime.isoformat(),
+                "calendar_events": calendar_results
             }
             
-            if google_success:
-                response["google_event_id"] = google_event_id
-                response["google_calendar"] = True
-            else:
-                response["google_calendar"] = False
-                response["note"] = "Saved locally"
+            # Add calendar status summary
+            successful_calendars = [p for p, r in calendar_results.items() if r.get("status") == "created"]
+            if successful_calendars:
+                response["calendars_synced"] = successful_calendars
+            
+            if len(calendar_results) == 0:
+                response["note"] = "Saved locally (no calendars connected)"
             
             return JSONResponse(content=response)
             
@@ -1810,6 +1978,216 @@ async def book_appointment(request: Request):
         return JSONResponse(
             status_code=500,
             content={"success": False, "message": f"Failed to book appointment: {str(e)}"}
+        )
+
+@router.get("/agent/get-appointments/{user_id}")
+async def get_appointments(user_id: int, from_date: str = None):
+    """
+    API for LiveKit agent to get all appointments.
+    Fetches from BOTH Google Calendar AND Outlook Calendar (if connected) AND local database.
+    Merges results and returns combined list.
+    """
+    try:
+        all_appointments = []
+        
+        # 1. Try to fetch from Google Calendar
+        try:
+            google_creds = db.get_google_credentials(user_id)
+            
+            if google_creds:
+                logging.info(f"Fetching Google Calendar appointments for user {user_id}")
+                from services.google_calendar_service import GoogleCalendarService
+                gcal = GoogleCalendarService(google_creds)
+                
+                # Parse date or use today
+                if from_date:
+                    target_date = datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc)
+                else:
+                    target_date = datetime.now(timezone.utc)
+                
+                # Get events for the next 30 days from target date
+                start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                end_date = start_of_day + timedelta(days=30)
+                
+                google_events = gcal.list_events(time_min=start_of_day, time_max=end_date, max_results=100)
+                
+                # Format Google Calendar events
+                for event in google_events:
+                    start = event.get("start", {})
+                    end = event.get("end", {})
+                    
+                    start_dt = start.get("dateTime", start.get("date", ""))
+                    end_dt = end.get("dateTime", end.get("date", ""))
+                    
+                    if start_dt:
+                        start_parsed = datetime.fromisoformat(start_dt.replace('Z', '+00:00'))
+                        event_date = start_parsed.date().isoformat()
+                        event_start_time = start_parsed.time().strftime('%H:%M')
+                    else:
+                        event_date = ""
+                        event_start_time = ""
+                    
+                    if end_dt:
+                        end_parsed = datetime.fromisoformat(end_dt.replace('Z', '+00:00'))
+                        event_end_time = end_parsed.time().strftime('%H:%M')
+                    else:
+                        event_end_time = ""
+                    
+                    all_appointments.append({
+                        "id": event.get("id", ""),
+                        "date": event_date,
+                        "start_time": event_start_time,
+                        "end_time": event_end_time,
+                        "attendee_name": event.get("location", ""),
+                        "attendee_email": "",
+                        "title": event.get("summary", ""),
+                        "description": event.get("description", ""),
+                        "status": "Scheduled",
+                        "source": "google_calendar"
+                    })
+                
+                # Update credentials if refreshed
+                updated_creds = gcal.get_updated_credentials()
+                if updated_creds['access_token'] != google_creds['access_token']:
+                    db.save_google_credentials(
+                        user_id=user_id,
+                        access_token=updated_creds['access_token'],
+                        refresh_token=updated_creds['refresh_token'],
+                        token_expiry=updated_creds['token_expiry'],
+                        scopes=updated_creds.get('scopes')
+                    )
+                
+                logging.info(f"Fetched {len(google_events)} appointments from Google Calendar")
+            else:
+                logging.info(f"User {user_id} does not have Google Calendar connected")
+        
+        except Exception as google_error:
+            logging.error(f"Google Calendar error: {google_error}")
+            traceback.print_exc()
+        
+        # 2. Try to fetch from Outlook Calendar
+        try:
+            outlook_creds = db.get_outlook_credentials(user_id)
+            
+            if outlook_creds:
+                logging.info(f"Fetching Outlook Calendar appointments for user {user_id}")
+                from services.outlook_calendar_service import OutlookCalendarService
+                ocal = OutlookCalendarService(outlook_creds)
+                
+                # Parse date or use today
+                if from_date:
+                    target_date = datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc)
+                else:
+                    target_date = datetime.now(timezone.utc)
+                
+                # Get events for the next 30 days from target date
+                start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                end_date = start_of_day + timedelta(days=30)
+                
+                outlook_events = ocal.list_events(time_min=start_of_day, time_max=end_date, max_results=100)
+                
+                # Format Outlook Calendar events
+                for event in outlook_events:
+                    start = event.get("start", {})
+                    end = event.get("end", {})
+                    
+                    start_dt = start.get("dateTime", "")
+                    end_dt = end.get("dateTime", "")
+                    
+                    if start_dt:
+                        start_parsed = datetime.fromisoformat(start_dt.replace('Z', '+00:00'))
+                        event_date = start_parsed.date().isoformat()
+                        event_start_time = start_parsed.time().strftime('%H:%M')
+                    else:
+                        event_date = ""
+                        event_start_time = ""
+                    
+                    if end_dt:
+                        end_parsed = datetime.fromisoformat(end_dt.replace('Z', '+00:00'))
+                        event_end_time = end_parsed.time().strftime('%H:%M')
+                    else:
+                        event_end_time = ""
+                    
+                    all_appointments.append({
+                        "id": event.get("id", ""),
+                        "date": event_date,
+                        "start_time": event_start_time,
+                        "end_time": event_end_time,
+                        "attendee_name": event.get("location", {}).get("displayName", ""),
+                        "attendee_email": "",
+                        "title": event.get("subject", ""),
+                        "description": event.get("body", {}).get("content", ""),
+                        "status": "Scheduled",
+                        "source": "outlook_calendar"
+                    })
+                
+                # Update credentials if refreshed
+                updated_creds = ocal.get_updated_credentials()
+                if updated_creds['access_token'] != outlook_creds['access_token']:
+                    db.save_outlook_credentials(
+                        user_id=user_id,
+                        access_token=updated_creds['access_token'],
+                        refresh_token=updated_creds['refresh_token'],
+                        token_expiry=updated_creds['token_expiry'],
+                        scopes=updated_creds.get('scopes')
+                    )
+                
+                logging.info(f"Fetched {len(outlook_events)} appointments from Outlook Calendar")
+            else:
+                logging.info(f"User {user_id} does not have Outlook Calendar connected")
+        
+        except Exception as outlook_error:
+            logging.error(f"Outlook Calendar error: {outlook_error}")
+            traceback.print_exc()
+        
+        # 3. Also fetch from local database
+        try:
+            local_appointments = db.get_user_appointments(user_id, from_date)
+            
+            # Format local appointments to match response structure
+            for apt in local_appointments:
+                scheduled_time = apt.get("scheduled_time", "")
+                if scheduled_time:
+                    if isinstance(scheduled_time, str):
+                        dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
+                    else:
+                        dt = scheduled_time
+                    
+                    all_appointments.append({
+                        "id": apt["id"],
+                        "date": dt.date().isoformat(),
+                        "start_time": dt.time().strftime('%H:%M'),
+                        "end_time": "",
+                        "attendee_name": apt.get("customer_name", ""),
+                        "attendee_email": "",
+                        "title": "Appointment",
+                        "description": apt.get("notes", ""),
+                        "status": apt.get("status", "Scheduled"),
+                        "source": "local_database"
+                    })
+            
+            logging.info(f"Fetched {len(local_appointments)} appointments from local database")
+        
+        except Exception as db_error:
+            logging.error(f"Database error: {db_error}")
+            traceback.print_exc()
+        
+        # 4. Sort all appointments by date and time
+        all_appointments.sort(key=lambda x: (x["date"], x["start_time"]))
+        
+        return JSONResponse({
+            "success": True,
+            "user_id": user_id,
+            "appointments": all_appointments,
+            "count": len(all_appointments)
+        })
+        
+    except Exception as e:
+        logging.error(f"Error fetching appointments: {e}")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
         )
 
 @router.post("/forgot-password")
@@ -1907,7 +2285,7 @@ async def reset_password(request: ResetPasswordRequest):
 #     logger = logging.getLogger(__name__)
     
 #     try:
-#         logger.info("ðŸ“¥ Starting voice migration from JSON...")
+#         logger.info(" Starting voice migration from JSON...")
         
 #         # Read and parse JSON
 #         content = await voices_json.read()
@@ -1916,7 +2294,7 @@ async def reset_password(request: ResetPasswordRequest):
 #         if not isinstance(voices_data, list):
 #             return error_response("Invalid JSON format. Expected array of voice objects.", 400)
         
-#         logger.info(f"ðŸ“‹ Found {len(voices_data)} voice records in JSON")
+#         logger.info(f" Found {len(voices_data)} voice records in JSON")
         
 #         # Validate required fields
 #         required_fields = ['voice_name', 'voice_id', 'language', 'country_code', 'gender', 'audio_blob_path']
@@ -1930,7 +2308,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 # Validate fields
 #                 missing_fields = [field for field in required_fields if field not in voice]
 #                 if missing_fields:
-#                     logger.warning(f"âš ï¸ Record {idx}: Missing fields {missing_fields}, skipping")
+#                     logger.warning(f" Record {idx}: Missing fields {missing_fields}, skipping")
 #                     failed.append(f"{voice.get('voice_name', 'Unknown')}: Missing {missing_fields}")
 #                     continue
                 
@@ -1946,7 +2324,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 })
                 
 #                 inserted_count += 1
-#                 logger.info(f"âœ… [{idx}/{len(voices_data)}] Inserted: {voice['voice_name']} ({voice['voice_id']})")
+#                 logger.info(f" [{idx}/{len(voices_data)}] Inserted: {voice['voice_name']} ({voice['voice_id']})")
                 
 #             except Exception as e:
 #                 error_msg = str(e)
@@ -2000,7 +2378,7 @@ async def reset_password(request: ResetPasswordRequest):
     
 #     try:
 #         # ==================== STEP 1: PARSE DOCUMENT ====================
-#         logger.info("ðŸ“‹ Step 1: Parsing voice document...")
+#         logger.info(" Step 1: Parsing voice document...")
 #         doc_content = (await voice_doc.read()).decode('utf-8')
         
 #         # Language mapping
@@ -2029,7 +2407,7 @@ async def reset_password(request: ResetPasswordRequest):
 #             for lang_name, lang_code in language_patterns.items():
 #                 if lang_name.lower() in line.lower() and ('voice' in line.lower() or 'agent' in line.lower()):
 #                     current_language = lang_code
-#                     logger.info(f"ðŸŒ Found language section: {lang_name.upper()} ({lang_code})")
+#                     logger.info(f" Found language section: {lang_name.upper()} ({lang_code})")
 #                     break
             
 #             # FIX: Match ANY "Name:" pattern (not just "First Name:", "Second Name:", etc.)
@@ -2037,7 +2415,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 # Save previous voice if complete
 #                 if current_voice and all(k in current_voice for k in ['voice_name', 'gender', 'voice_id', 'audio_filename']):
 #                     voices.append(current_voice)
-#                     logger.info(f"  âœ“ Added: {current_voice['voice_name']}")
+#                     logger.info(f"   Added: {current_voice['voice_name']}")
                 
 #                 # Start new voice
 #                 name = re.sub(r'^(First\s+|Second\s+|Third\s+|Fourth\s+)?Name:\s*', '', line, flags=re.IGNORECASE).strip()
@@ -2064,16 +2442,16 @@ async def reset_password(request: ResetPasswordRequest):
 #         # Add last voice
 #         if current_voice and all(k in current_voice for k in ['voice_name', 'gender', 'voice_id', 'audio_filename']):
 #             voices.append(current_voice)
-#             logger.info(f"  âœ“ Added: {current_voice['voice_name']}")
+#             logger.info(f"   Added: {current_voice['voice_name']}")
         
-#         logger.info(f"âœ… Parsed {len(voices)} voices from document")
+#         logger.info(f" Parsed {len(voices)} voices from document")
         
 #         if not voices:
 #             return error_response("No voices found in document", 400)
         
 #         # Log parsed voices for debugging
 #         for v in voices:
-#             logger.info(f"  ðŸ“ {v['voice_name']} ({v['language']}) - {v['voice_id']}")
+#             logger.info(f"   {v['voice_name']} ({v['language']}) - {v['voice_id']}")
 #             logger.info(f"     Audio: {v['audio_filename']}")
         
 #         # ==================== STEP 2: SAVE AUDIO FILES TEMPORARILY ====================
@@ -2098,7 +2476,7 @@ async def reset_password(request: ResetPasswordRequest):
 #             normalized_name = audio_file.filename.lower().replace(' ', '').replace('_', '').replace('-', '')
 #             audio_file_map[normalized_name] = file_path
             
-#             logger.info(f"  âœ“ Saved: {audio_file.filename}")
+#             logger.info(f"   Saved: {audio_file.filename}")
         
 #         logger.info(f" Saved {len(audio_files)} audio files")
         
@@ -2114,7 +2492,7 @@ async def reset_password(request: ResetPasswordRequest):
 #             if expected_filename in audio_file_map:
 #                 voice['audio_path'] = audio_file_map[expected_filename]
 #                 matched_voices.append(voice)
-#                 logger.info(f" Exact match: {voice['voice_name']} â†’ {expected_filename}")
+#                 logger.info(f" Exact match: {voice['voice_name']}  {expected_filename}")
 #                 matched = True
 #                 continue
             
@@ -2123,7 +2501,7 @@ async def reset_password(request: ResetPasswordRequest):
 #             if exact_path.exists():
 #                 voice['audio_path'] = exact_path
 #                 matched_voices.append(voice)
-#                 logger.info(f" File system match: {voice['voice_name']} â†’ {expected_filename}")
+#                 logger.info(f" File system match: {voice['voice_name']}  {expected_filename}")
 #                 matched = True
 #                 continue
             
@@ -2134,7 +2512,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 voice['audio_path'] = audio_file_map[normalized_expected]
 #                 matched_voices.append(voice)
 #                 actual_name = audio_file_map[normalized_expected].name
-#                 logger.info(f" Fuzzy match: {voice['voice_name']} â†’ {actual_name}")
+#                 logger.info(f" Fuzzy match: {voice['voice_name']}  {actual_name}")
 #                 matched = True
 #                 continue
             
@@ -2145,7 +2523,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                     if voice_id in filename.lower():
 #                         voice['audio_path'] = filepath
 #                         matched_voices.append(voice)
-#                         logger.info(f" ID match: {voice['voice_name']} â†’ {filepath.name}")
+#                         logger.info(f" ID match: {voice['voice_name']}  {filepath.name}")
 #                         matched = True
 #                         break
             
@@ -2191,7 +2569,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 voice['audio_blob_path'] = blob_path
 #                 uploaded_voices.append(voice)
                 
-#                 logger.info(f" Uploaded: {voice['voice_name']} â†’ {blob_path}")
+#                 logger.info(f" Uploaded: {voice['voice_name']}  {blob_path}")
                 
 #             except Exception as e:
 #                 error_msg = f"Upload failed for {voice['voice_name']}: {str(e)}"
@@ -2346,7 +2724,7 @@ async def submit_contact_form(request: ContactFormRequest):
             logging.error(f"Failed to send contact form email from {request.email}")
             return error_response("Failed to send message. Please try again.", 500)
         
-        logging.info(f"âœ… Contact form submitted by {request.first_name} {request.last_name} ({request.email})")
+        logging.info(f" Contact form submitted by {request.first_name} {request.last_name} ({request.email})")
         
         return JSONResponse({
             "success": True,
@@ -2436,7 +2814,7 @@ async def google_auth_login(current_user: dict = Depends(get_current_user)):
             prompt='consent'  # Force consent screen to get refresh token
         )
         
-        logging.info(f"âœ… Generated OAuth URL for user {user_id}")
+        logging.info(f" Generated OAuth URL for user {user_id}")
         logging.error("===== GOOGLE OAUTH RUNTIME CHECK =====")
         logging.error(f"CLIENT_ID = {client_id}")
         logging.error(f"REDIRECT_URI = '{redirect_uri}'")
@@ -2513,7 +2891,7 @@ async def google_callback(request: Request):
             scopes=credentials.scopes
         )
         
-        logging.info(f"✅ Saved Google credentials for user {user_id}")
+        logging.info(f"? Saved Google credentials for user {user_id}")
         
         # Redirect to dashboard with success message
         return RedirectResponse(f"{frontend_url}/dashboard?calendar_success=true")
@@ -2605,7 +2983,7 @@ async def google_events(
         updated_creds = gcal.get_updated_credentials()
         if updated_creds['access_token'] != credentials['access_token']:
             db.save_google_credentials(user_id, **updated_creds)
-            logging.info(f"ðŸ”„ Refreshed Google credentials for user {user_id}")
+            logging.info(f" Refreshed Google credentials for user {user_id}")
         
         return JSONResponse({
             "events": events
@@ -2754,7 +3132,7 @@ async def book_google_appointment_for_agent(request: Request):
         is_available = gcal.check_availability(start_datetime, end_datetime)
         
         if not is_available:
-            logging.warning(f"⚠️ Time slot conflict for user {user_id} on {appointment_date} {start_time}-{end_time}")
+            logging.warning(f"?? Time slot conflict for user {user_id} on {appointment_date} {start_time}-{end_time}")
             return JSONResponse(
                 status_code=409,
                 content={
@@ -2793,9 +3171,9 @@ async def book_google_appointment_for_agent(request: Request):
         updated_creds = gcal.get_updated_credentials()
         if updated_creds['access_token'] != credentials['access_token']:
             db.save_google_credentials(user_id, **updated_creds)
-            logging.info(f"🔄 Refreshed Google credentials for user {user_id}")
+            logging.info(f"?? Refreshed Google credentials for user {user_id}")
         
-        logging.info(f"✅ Booked appointment for user {user_id}: {title} on {appointment_date} {start_time}-{end_time}")
+        logging.info(f"? Booked appointment for user {user_id}: {title} on {appointment_date} {start_time}-{end_time}")
         
         return JSONResponse({
             "success": True,
@@ -2812,3 +3190,300 @@ async def book_google_appointment_for_agent(request: Request):
             f"Failed to book appointment: {str(e)}",
             status_code=500
         )
+        
+@router.get("/voice-samples")
+async def get_voice_samples(language: Optional[str] = Query(None)):
+    """
+    PUBLIC endpoint - Get all voice samples with presigned URLs
+    No authentication required
+    """
+    try:
+        # Get samples from database
+        if language:
+            samples = db.get_voice_samples_by_language(language)
+        else:
+            samples = db.get_all_voice_samples()
+        
+        # Add presigned URLs (valid for 24 hours)
+        for sample in samples:
+            if sample.get("audio_blob_path"):
+                sample["audio_url"] = generate_presigned_url(
+                    sample["audio_blob_path"],
+                    expiration=86400  # 24 hours
+                )
+            
+            # Format timestamp
+            if sample.get("created_at"):
+                sample["created_at"] = sample["created_at"].isoformat()
+        
+        # Group by language for easier frontend consumption
+        grouped = {}
+        for sample in samples:
+            lang = sample["language"]
+            if lang not in grouped:
+                grouped[lang] = []
+            grouped[lang].append(sample)
+        
+        return JSONResponse({
+            "success": True,
+            "total": len(samples),
+            "grouped_by_language": grouped,
+            "all_samples": samples
+        })
+        
+    except Exception as e:
+        logging.error(f"Error fetching voice samples: {e}")
+        traceback.print_exc()
+        return error_response("Failed to fetch voice samples", 500)
+
+
+# ==================== Calendar OAuth Endpoints ====================
+
+@router.get("/calendar/google/auth")
+async def google_calendar_auth(user_id: int = Query(...)):
+    """Initiate Google Calendar OAuth flow"""
+    try:
+        from google_auth_oauthlib.flow import Flow
+        
+        GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+        GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+        GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/api/calendar/google/callback")
+        
+        flow = Flow.from_client_config(
+            {
+                "web": {
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [GOOGLE_REDIRECT_URI]
+                }
+            },
+            scopes=['https://www.googleapis.com/auth/calendar']
+        )
+        flow.redirect_uri = GOOGLE_REDIRECT_URI
+        
+        authorization_url, state = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true',
+            prompt='consent'
+        )
+        
+        # Store state with user_id for validation in callback
+        # In production, use Redis or session storage
+        authorization_url += f"&state={user_id}"
+        
+        return RedirectResponse(authorization_url)
+        
+    except Exception as e:
+        logging.error(f"Error initiating Google OAuth: {e}")
+        return error_response(f"OAuth initialization failed: {str(e)}", 500)
+
+
+@router.get("/calendar/google/callback")
+async def google_calendar_callback(code: str = Query(...), state: str = Query(...)):
+    """Handle Google Calendar OAuth callback"""
+    try:
+        from google_auth_oauthlib.flow import Flow
+        
+        user_id = int(state)  # Extract user_id from state
+        
+        GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+        GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+        GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/api/calendar/google/callback")
+        
+        flow = Flow.from_client_config(
+            {
+                "web": {
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [GOOGLE_REDIRECT_URI]
+                }
+            },
+            scopes=['https://www.googleapis.com/auth/calendar']
+        )
+        flow.redirect_uri = GOOGLE_REDIRECT_URI
+        
+        flow.fetch_token(code=code)
+        
+        credentials = flow.credentials
+        
+        # Save credentials to database
+        db.save_google_credentials(
+            user_id=user_id,
+            access_token=credentials.token,
+            refresh_token=credentials.refresh_token,
+            token_expiry=credentials.expiry,
+            scopes=['https://www.googleapis.com/auth/calendar']
+        )
+        
+        logging.info(f"Google Calendar connected for user {user_id}")
+        
+        return JSONResponse({
+            "success": True,
+            "message": "Google Calendar connected successfully",
+            "provider": "google"
+        })
+        
+    except Exception as e:
+        logging.error(f"Error in Google OAuth callback: {e}")
+        traceback.print_exc()
+        return error_response(f"OAuth callback failed: {str(e)}", 500)
+
+
+
+@router.get("/calendar/outlook/auth")
+async def outlook_calendar_auth(user_id: int = Query(...)):
+    """Initiate Outlook Calendar OAuth flow"""
+    try:
+        import msal
+        
+        MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
+        MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "common")
+        MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:8000/api/calendar/outlook/callback")
+        
+        msal_app = msal.ConfidentialClientApplication(
+            MICROSOFT_CLIENT_ID,
+            authority=f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}",
+            client_credential=os.getenv("MICROSOFT_CLIENT_SECRET")
+        )
+        
+        auth_url = msal_app.get_authorization_request_url(
+            scopes=["Calendars.ReadWrite", "User.Read"],
+            redirect_uri=MICROSOFT_REDIRECT_URI,
+            state=str(user_id)
+        )
+        
+        # Return JSON instead of redirect to avoid CORS issues
+        return JSONResponse(content={
+            "success": True,
+            "auth_url": auth_url
+        })
+        
+    except Exception as e:
+        logging.error(f"Error initiating Outlook OAuth: {e}")
+        return error_response(f"OAuth initialization failed: {str(e)}", 500)
+
+
+
+@router.get("/calendar/outlook/callback")
+async def outlook_calendar_callback(code: str = Query(...), state: str = Query(...)):
+    """Handle Outlook Calendar OAuth callback"""
+    try:
+        import msal
+        
+        user_id = int(state)
+        
+        MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
+        MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET")
+        MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "common")
+        MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:8000/api/calendar/outlook/callback")
+        
+        msal_app = msal.ConfidentialClientApplication(
+            MICROSOFT_CLIENT_ID,
+            authority=f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}",
+            client_credential=MICROSOFT_CLIENT_SECRET
+        )
+        
+        result = msal_app.acquire_token_by_authorization_code(
+            code,
+            scopes=["Calendars.ReadWrite", "User.Read"],
+            redirect_uri=MICROSOFT_REDIRECT_URI
+        )
+        
+        if "access_token" not in result:
+            raise Exception(f"Token acquisition failed: {result.get('error_description')}")
+        
+        # Calculate token expiry
+        expires_in = result.get('expires_in', 3600)
+        token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        
+        # Save credentials
+        db.save_outlook_credentials(
+            user_id=user_id,
+            access_token=result['access_token'],
+            refresh_token=result.get('refresh_token', ''),
+            token_expiry=token_expiry,
+            scopes='Calendars.ReadWrite,offline_access,User.Read'
+        )
+        
+        logging.info(f"Outlook Calendar connected for user {user_id}")
+        
+        # Redirect back to frontend with success
+        frontend_url = os.getenv("FRONTEND_URL", "https://mrbot-ki.de")
+        return RedirectResponse(f"{frontend_url}/dashboard/?outlook=success")
+        
+    except Exception as e:
+        logging.error(f"Error in Outlook OAuth callback: {e}")
+        traceback.print_exc()
+        # Redirect to frontend with error
+        frontend_url = os.getenv("FRONTEND_URL", "https://mrbot-ki.de")
+        return RedirectResponse(f"{frontend_url}/dashboard/?outlook=error&message={str(e)}")
+
+
+@router.get("/calendar/status")
+async def get_calendar_status(current_user: dict = Depends(get_current_user)):
+    """Get calendar connection status for current user"""
+    try:
+        user_id = current_user['id']
+        
+        google_creds = db.get_google_credentials(user_id)
+        outlook_creds = db.get_outlook_credentials(user_id)
+        
+        status = {
+            "google": {"connected": False},
+            "outlook": {"connected": False}
+        }
+        
+        if google_creds:
+            status['google'] = {
+                "connected": True,
+                "expires_at": google_creds.get('token_expiry')
+            }
+        
+        if outlook_creds:
+            status['outlook'] = {
+                "connected": True,
+                "expires_at": outlook_creds.get('token_expiry')
+            }
+        
+        return JSONResponse({
+            "success": True,
+            "calendars": status
+        })
+        
+    except Exception as e:
+        logging.error(f"Error getting calendar status: {e}")
+        return error_response(str(e), 500)
+
+
+@router.delete("/calendar/{provider}/disconnect")
+async def disconnect_calendar(provider: str, current_user: dict = Depends(get_current_user)):
+    """Disconnect a calendar provider"""
+    try:
+        if provider not in ['google', 'outlook']:
+            return error_response("Invalid provider. Must be 'google' or 'outlook'", 400)
+        
+        user_id = current_user['id']
+        
+        if provider == 'google':
+            success = db.delete_google_credentials(user_id)
+        elif provider == 'outlook':
+            success = db.delete_outlook_credentials(user_id)
+        else:
+            return error_response("Invalid provider", 400)
+        
+        if success:
+            return JSONResponse({
+                "success": True,
+                "message": f"{provider.capitalize()} Calendar disconnected successfully"
+            })
+        else:
+            return error_response(f"Failed to disconnect {provider}", 500)
+        
+    except Exception as e:
+        logging.error(f"Error disconnecting calendar: {e}")
+        return error_response(str(e), 500)
+
