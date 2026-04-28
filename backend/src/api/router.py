@@ -34,7 +34,10 @@ from src.api.base_models import (
     CreateAgentRequest,
     ResetPasswordRequest,
     ForgotPasswordRequest,
-    ContactFormRequest
+    ContactFormRequest,
+    SubscriptionPlanCreate,
+    SubscriptionPlanUpdate,
+    SubscriptionPlanOut,
 )
 from src.utils.db import PGDB 
 from src.utils.mail_management import Send_Mail
@@ -1955,3 +1958,171 @@ async def submit_contact_form(request: ContactFormRequest):
         logging.error(f"Error processing contact form: {e}")
         traceback.print_exc()
         return error_response("Failed to submit contact form", 500)
+    
+    # ==================== SUBSCRIPTION PLANS ENDPOINTS ====================
+
+ 
+def _serialize_plan(plan: dict) -> dict:
+    """
+    Normalize a subscription_plan row from the DB before sending to client.
+    - Converts JSONB `features` to a plain Python list if needed.
+    - Converts datetime fields to ISO strings.
+    """
+    import json as _json
+ 
+    if plan.get("features") is not None:
+        features = plan["features"]
+        if isinstance(features, str):
+            try:
+                features = _json.loads(features)
+            except Exception:
+                features = []
+        plan["features"] = features if isinstance(features, list) else []
+    else:
+        plan["features"] = []
+ 
+    for dt_field in ("created_at", "updated_at"):
+        if plan.get(dt_field) and hasattr(plan[dt_field], "isoformat"):
+            plan[dt_field] = plan[dt_field].isoformat()
+ 
+    if "price" in plan and plan["price"] is not None:
+        plan["price"] = float(plan["price"])
+ 
+    return plan
+ 
+ 
+# ---------- ADMIN: POST /subscription-plans ----------------------------------
+ 
+@router.post("/subscription-plans", response_model=SubscriptionPlanOut)
+async def admin_create_subscription_plan(
+    payload: SubscriptionPlanCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    **Admin only** — Create a new subscription plan.
+ 
+    Plans created here are immediately visible to all users via
+    `GET /subscription-plans` (if `is_active=True`).
+ 
+    Raises 403 if the caller is not an admin.
+    """
+    if not current_user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+ 
+    try:
+        plan = db.create_subscription_plan(
+            plan_data=payload.dict(),
+            admin_id=current_user["id"],
+        )
+        return JSONResponse(
+            status_code=201,
+            content={"success": True, "data": _serialize_plan(plan)},
+        )
+    except Exception as e:
+        logging.error(f"Error creating subscription plan: {e}")
+        traceback.print_exc()
+        return error_response("Failed to create subscription plan.", 500)
+ 
+ 
+# ---------- ADMIN: PUT /subscription-plans/{plan_id} -------------------------
+ 
+@router.put("/subscription-plans/{plan_id}")
+async def admin_update_subscription_plan(
+    plan_id: int,
+    payload: SubscriptionPlanUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    **Admin only** — Partially update an existing subscription plan.
+ 
+    Only the fields you send in the request body will be changed.
+    """
+    if not current_user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+ 
+    update_data = payload.dict(exclude_none=True)
+    if not update_data:
+        return error_response("No fields provided for update.", 400)
+ 
+    try:
+        updated = db.update_subscription_plan(plan_id, update_data)
+        return JSONResponse(
+            status_code=200,
+            content={"success": True, "data": _serialize_plan(updated)},
+        )
+    except ValueError as e:
+        return error_response(str(e), 404)
+    except Exception as e:
+        logging.error(f"Error updating subscription plan {plan_id}: {e}")
+        traceback.print_exc()
+        return error_response("Failed to update subscription plan.", 500)
+ 
+ 
+# ---------- ADMIN: DELETE /subscription-plans/{plan_id} ----------------------
+ 
+@router.delete("/subscription-plans/{plan_id}")
+async def admin_delete_subscription_plan(
+    plan_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    **Admin only** — Soft-delete a subscription plan (sets is_active = False).
+ 
+    The plan disappears from the user-facing list immediately but is
+    preserved in the database for audit purposes.
+    """
+    if not current_user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+ 
+    try:
+        deleted = db.delete_subscription_plan(plan_id)
+        if not deleted:
+            return error_response(f"Subscription plan {plan_id} not found.", 404)
+        return JSONResponse(
+            status_code=200,
+            content={"success": True, "message": f"Plan {plan_id} deactivated."},
+        )
+    except Exception as e:
+        logging.error(f"Error deleting subscription plan {plan_id}: {e}")
+        traceback.print_exc()
+        return error_response("Failed to delete subscription plan.", 500)
+ 
+ 
+# ---------- PUBLIC / USER: GET /subscription-plans ---------------------------
+ 
+@router.get("/subscription-plans")
+async def get_subscription_plans(
+    include_inactive: bool = Query(
+        default=False,
+        description="Admins can pass true to see deactivated plans too."
+    ),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    **All authenticated users** — List available subscription plans.
+ 
+    - Regular users always see only active plans.
+    - Admins may additionally request inactive plans via `?include_inactive=true`.
+ 
+    Plans are ordered by `sort_order` (ascending) so the admin controls
+    the display sequence on the pricing page.
+    """
+    # Non-admins are locked to active-only regardless of the query param
+    if not current_user.get("is_admin"):
+        include_inactive = False
+ 
+    try:
+        plans = db.get_all_subscription_plans(include_inactive=include_inactive)
+        serialized = [_serialize_plan(p) for p in plans]
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "total": len(serialized),
+                "data": serialized,
+            },
+        )
+    except Exception as e:
+        logging.error(f"Error fetching subscription plans: {e}")
+        traceback.print_exc()
+        return error_response("Failed to fetch subscription plans.", 500)
