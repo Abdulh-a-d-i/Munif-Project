@@ -21,12 +21,14 @@ class UserOut(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     created_at: datetime
-    is_admin: bool = False #*
+    is_admin: bool = False
+    role: Literal['admin', 'user'] = 'user'  
 
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str
     user: UserOut
+    onboard: bool  
 
 class UpdateUserProfileRequest(BaseModel):
     # user_id: int
@@ -78,7 +80,7 @@ class CreateAgentRequest(BaseModel):
     agent_name: str = Field(..., min_length=1, max_length=100)
     phone_number: str = Field(..., min_length=10, max_length=20)
     system_prompt: str = Field(..., min_length=10)
-    voice_type: str = Field(..., pattern="^(male|female)$")
+    voice_type: Optional[str] = Field(None, pattern="^(male|female)$")  # Optional - defaults to None
     language: Optional[str] = Field(default="en", max_length=10)
     industry: Optional[str] = Field(default=None, max_length=50)
     owner_name: Optional[str] = Field(default=None, max_length=100)
@@ -86,6 +88,7 @@ class CreateAgentRequest(BaseModel):
     business_hours_start: Optional[str] = Field(default=None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
     business_hours_end: Optional[str] = Field(default=None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
     allowed_minutes: Optional[int] = Field(default=0, ge=0)  # NEW
+    user_id: Optional[int] = Field(default=None, gt=0)  # NEW: Assign agent to user
     
     class Config:
         json_schema_extra = {
@@ -118,6 +121,7 @@ class UpdateAgentRequest(BaseModel):
     business_hours_start: Optional[str] = Field(None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
     business_hours_end: Optional[str] = Field(None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
     allowed_minutes: Optional[int] = Field(None, ge=0)  # NEW
+    user_id: Optional[int] = Field(None, gt=0)  # NEW: Update user assignment
     
     class Config:
         json_schema_extra = {
@@ -159,3 +163,123 @@ class ContactFormRequest(BaseModel):
     last_name: str
     email: EmailStr
     message: Optional[str] = None
+
+
+class ToggleAgentStatusRequest(BaseModel):
+    """
+    Request model for toggling agent status.
+    user_id is optional - if provided by Admin, acts on behalf of that user.
+    """
+    agent_id: int = Field(..., gt=0)
+    is_active: bool = Field(...)
+    user_id: Optional[int] = Field(None, gt=0)  # NEW: Allow admin to toggle for specific user
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "agent_id": 5,
+                "is_active": True,
+                "user_id": 12  # Optional: For admin use
+            }
+        }
+
+
+class BusinessDetailsRequest(BaseModel):
+    """Request model for post-signup business details submission"""
+    agent_name: str = Field(None, min_length=1, max_length=100)
+    business_name: str = Field(None, min_length=1, max_length=100)
+    business_email: str = Field(None, min_length=1)
+    phone_number: str = Field(None, min_length=10, max_length=20)  
+    industry: str = Field(None, min_length=1, max_length=50)
+    language: str = Field(None, min_length=1, max_length=50)
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "agent_name": "String",
+                "business_name": "String",
+                "business_email": "String",
+                "phone_number": "String",
+                "industry": "String",
+                "language": "String"
+            }
+        }
+
+
+
+
+class UpdateAdminStatusRequest(BaseModel):
+    """Request model for updating user admin status"""
+    is_admin: bool = Field(...)
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "is_admin": True
+            }
+        }
+
+
+# ==================== GOOGLE CALENDAR MODELS ====================
+
+class GoogleAuthStatusResponse(BaseModel):
+    """Response model for Google Calendar connection status"""
+    connected: bool
+    email: Optional[str] = None
+
+
+class GoogleAuthLoginResponse(BaseModel):
+    """Response model for Google OAuth login URL"""
+    authorization_url: str
+
+
+class GoogleEvent(BaseModel):
+    """Model for a single Google Calendar event"""
+    id: str
+    summary: str
+    date: str
+    start_time: str
+    end_time: str
+    description: Optional[str] = None
+    location: Optional[str] = None
+
+
+class GoogleEventsResponse(BaseModel):
+    """Response model for list of Google Calendar events"""
+    events: List[GoogleEvent]
+
+
+class BookAppointmentRequest(BaseModel):
+    """Request model for booking an appointment via AI agent"""
+    user_id: int = Field(..., gt=0)
+    appointment_date: str = Field(..., pattern=r'^\d{4}-\d{2}-\d{2}$')  # YYYY-MM-DD
+    start_time: str = Field(..., pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # HH:MM
+    end_time: str = Field(..., pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # HH:MM
+    attendee_email: EmailStr
+    attendee_name: Optional[str] = None
+    title: str = Field(..., min_length=1)
+    description: Optional[str] = None
+    notes: Optional[str] = None
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "user_id": 1,
+                "appointment_date": "2026-01-25",
+                "start_time": "14:00",
+                "end_time": "15:00",
+                "attendee_email": "customer@example.com",
+                "attendee_name": "John Doe",
+                "title": "Consultation Call",
+                "description": "Initial consultation meeting",
+                "notes": "Discussed via AI agent"
+            }
+        }
+
+
+class BookAppointmentResponse(BaseModel):
+    """Response model for appointment booking"""
+    success: bool
+    conflict: bool = False
+    event_id: Optional[str] = None
+    message: str

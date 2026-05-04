@@ -9,16 +9,13 @@ import json
 import base64
 import httpx
 import traceback
-from datetime import datetime, timezone  
+import asyncio
+from datetime import datetime, timezone, timedelta  
 
 from src.utils.db import PGDB
 
 db = PGDB()
-auth_scheme = HTTPBearer()
-# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
-
-from fastapi.security import HTTPBearer,HTTPAuthorizationCredentials
-auth_scheme = HTTPBearer()
+auth_scheme = HTTPBearer(auto_error=False)
 
 import boto3
 from botocore.exceptions import ClientError
@@ -49,11 +46,11 @@ async def _fetch_from_s3_blob(blob_name: str) -> bytes:
         response = s3_client.get_object(Bucket=bucket_name, Key=blob_name)
         data = response['Body'].read()
         
-        logging.info(f"✅ Downloaded {len(data)} bytes from Hetzner: {blob_name}")
+        logging.info(f" Downloaded {len(data)} bytes from Hetzner: {blob_name}")
         return data
             
     except ClientError as e:
-        logging.error(f"❌ S3 download failed for {blob_name}: {e}")
+        logging.error(f" S3 download failed for {blob_name}: {e}")
         traceback.print_exc()
         return None
 
@@ -63,7 +60,7 @@ async def fetch_and_store_transcript(call_id: str, transcript_url: str = None, t
         transcript_data = None
         
         if transcript_blob:
-            logging.info(f"📥 Downloading transcript from blob: {transcript_blob}")
+            logging.info(f" Downloading transcript from blob: {transcript_blob}")
             try:
                 s3_client = get_s3_client()
                 bucket_name = os.getenv("HETZNER_BUCKET_NAME")
@@ -71,14 +68,14 @@ async def fetch_and_store_transcript(call_id: str, transcript_url: str = None, t
                 response = s3_client.get_object(Bucket=bucket_name, Key=transcript_blob)
                 transcript_json = response['Body'].read().decode('utf-8')
                 transcript_data = json.loads(transcript_json)
-                logging.info(f"✅ Downloaded transcript from blob")
+                logging.info(f" Downloaded transcript from blob")
                 
             except ClientError as e:
-                logging.error(f"❌ Blob download failed: {e}")
+                logging.error(f" Blob download failed: {e}")
                 traceback.print_exc()
                 return None
         else:
-            logging.warning(f"⚠️ No transcript_blob provided for {call_id}")
+            logging.warning(f" No transcript_blob provided for {call_id}")
             return None
         
         # Rest of function remains same...
@@ -92,9 +89,9 @@ async def fetch_and_store_transcript(call_id: str, transcript_url: str = None, t
             
             if has_content:
                 db.update_call_history(call_id, {"transcript": transcript_data})
-                logging.info(f"✅ Transcript stored ({len(str(transcript_data))} chars)")
+                logging.info(f" Transcript stored ({len(str(transcript_data))} chars)")
             else:
-                logging.warning(f"⚠️ Empty transcript for {call_id}")
+                logging.warning(f" Empty transcript for {call_id}")
                 db.update_call_history(call_id, {"transcript": {"items": [], "note": "No conversation"}})
             
             return transcript_data
@@ -102,7 +99,7 @@ async def fetch_and_store_transcript(call_id: str, transcript_url: str = None, t
         return None
         
     except Exception as e:
-        logging.error(f"❌ Error fetching transcript: {e}")
+        logging.error(f" Error fetching transcript: {e}")
         traceback.print_exc()
         return None
 
@@ -113,7 +110,7 @@ async def fetch_and_store_recording(call_id: str, recording_url: str = None, rec
     NO DOWNLOAD NEEDED!
     """
     try:
-        logging.info(f"🎵 Recording path already stored: {recording_blob_name}")
+        logging.info(f" Recording path already stored: {recording_blob_name}")
         
         # Path is already in DB from agent upload
         # We only verify it exists
@@ -123,14 +120,21 @@ async def fetch_and_store_recording(call_id: str, recording_url: str = None, rec
             
             try:
                 s3_client.head_object(Bucket=bucket_name, Key=recording_blob_name)
-                logging.info(f"✅ Recording exists in Hetzner: {recording_blob_name}")
+                logging.info(f" Recording exists in Hetzner: {recording_blob_name}")
             except ClientError:
-                logging.warning(f"⚠️ Recording not found in bucket: {recording_blob_name}")
+                logging.warning(f" Recording not found in bucket: {recording_blob_name}")
         
     except Exception as e:
-        logging.error(f"❌ Error verifying recording: {e}")
+        logging.error(f" Error verifying recording: {e}")
 
 def get_current_user(token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
+    if not token:
+        logging.warning(" No authentication token provided")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     # Token decode step
     try:
         logging.info(f"token: {token}")
@@ -160,6 +164,10 @@ def get_current_user(token: HTTPAuthorizationCredentials = Depends(auth_scheme))
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found.",
             )
+        # Ensure role field is present (added by get_user_by_id)
+        if 'role' not in user:
+            user['role'] = 'admin' if user.get('is_admin', False) else 'user'
+        logging.debug(f"Authenticated user {user_id} with role: {user['role']}")
         return user
     except Exception as e:
         logging.error(f"Database error while fetching user_id {user_id}: {e}")
@@ -176,26 +184,18 @@ def error_response(message: str, status_code: int = 400):
 
 
 
-def is_admin(current_user=Depends(get_current_user)):
+def require_admin(current_user: dict = Depends(get_current_user)):
     """
-    Check if the current user is an admin.
-    If not, return a 403 Forbidden response.
+    Dependency to ensure user is admin.
+    Raises 403 if user is not admin.
+    Use this as a dependency for admin-only endpoints.
     """
-    # # Assuming current_user[5] is the admin flag (True/False)
-    print(current_user)
-    try:
-        if current_user[5] == False:
-            raise HTTPException(
-                status_code=403,
-                detail="You do not have permission to perform this action."
-            )
-    except Exception as e:
-        logging.error(f"Error checking admin status for user : {e}")
+    if not current_user.get("is_admin", False):
+        logging.warning(f"Non-admin user {current_user.get('id')} attempted to access admin endpoint")
         raise HTTPException(
-            status_code=500,
-            detail=f"{e}"
+            status_code=403,
+            detail="Admin access required"
         )
-
     return current_user
 
 def add_call_event(call_id: str, event_type: str, event_data: dict = None):
@@ -235,7 +235,7 @@ def add_call_event(call_id: str, event_type: str, event_data: dict = None):
         conn.rollback()
         logging.error(f"Error adding call event: {e}")
     finally:
-        db.release_connection(conn)  # ✅ 
+        db.release_connection(conn)  #  
 
 import os
 import asyncio
@@ -248,7 +248,7 @@ def calculate_duration(started_at, ended_at) -> float:
     Handles None values, various timestamp formats, and timezone issues.
     """
     if not started_at or not ended_at:
-        logging.warning(f"⚠️ Missing timestamps: start={started_at}, end={ended_at}")
+        logging.warning(f" Missing timestamps: start={started_at}, end={ended_at}")
         return 0
     
     try:
@@ -260,7 +260,7 @@ def calculate_duration(started_at, ended_at) -> float:
         elif isinstance(started_at, datetime):
             start_dt = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
         else:
-            logging.error(f"❌ Invalid started_at type: {type(started_at)}")
+            logging.error(f" Invalid started_at type: {type(started_at)}")
             return 0
         
         if isinstance(ended_at, (int, float)):
@@ -270,7 +270,7 @@ def calculate_duration(started_at, ended_at) -> float:
         elif isinstance(ended_at, datetime):
             end_dt = ended_at if ended_at.tzinfo else ended_at.replace(tzinfo=timezone.utc)
         else:
-            logging.error(f"❌ Invalid ended_at type: {type(ended_at)}")
+            logging.error(f" Invalid ended_at type: {type(ended_at)}")
             return 0
         
         # Calculate duration
@@ -278,16 +278,16 @@ def calculate_duration(started_at, ended_at) -> float:
         
         # Sanity check
         if duration < 0:
-            logging.warning(f"⚠️ Negative duration: {duration}s (end before start)")
+            logging.warning(f" Negative duration: {duration}s (end before start)")
             return 0
         
         if duration > 86400:  # More than 24 hours
-            logging.warning(f"⚠️ Suspiciously long duration: {duration}s")
+            logging.warning(f" Suspiciously long duration: {duration}s")
         
         return round(max(0, duration), 1)
         
     except Exception as e:
-        logging.error(f"❌ Error calculating duration: {e}")
+        logging.error(f" Error calculating duration: {e}")
         logging.error(f"   started_at: {started_at} ({type(started_at)})")
         logging.error(f"   ended_at: {ended_at} ({type(ended_at)})")
         traceback.print_exc()
@@ -298,7 +298,7 @@ def check_if_answered(events_log) -> bool:
     """
     Determine if call was actually answered by checking events_log.
     
-    ⚠️ CRITICAL: We can ONLY check events_log because transcript 
+    CRITICAL: We can ONLY check events_log because transcript 
     doesn't exist yet when room_ended fires!
     
     Returns True if:
@@ -306,16 +306,16 @@ def check_if_answered(events_log) -> bool:
     - Recording started (egress_started means call was answered)
     """
     if not events_log:
-        logging.warning("⚠️ No events_log - assuming unanswered")
+        logging.warning(" No events_log - assuming unanswered")
         return False
     
     try:
         events = json.loads(events_log) if isinstance(events_log, str) else events_log
         
-        # ✅ Check if recording started (definitive proof)
+        # Check if recording started (definitive proof)
         egress_started = any(ev.get("event") == "egress_started" for ev in events)
         
-        # ✅ Check if SIP participant joined (they picked up)
+        # Check if SIP participant joined (they picked up)
         sip_participant_joined = False
         for ev in events:
             if ev.get("event") == "participant_joined":
@@ -325,15 +325,15 @@ def check_if_answered(events_log) -> bool:
                     sip_participant_joined = True
                     break
         
-        # ✅ Either condition means call was answered
+        # Either condition means call was answered
         answered = egress_started or sip_participant_joined
         
-        logging.info(f"📊 Answered check: egress={egress_started}, sip_joined={sip_participant_joined} → {answered}")
+        logging.info(f" Answered check: egress={egress_started}, sip_joined={sip_participant_joined}  {answered}")
         
         return answered
         
     except Exception as e:
-        logging.error(f"❌ Error parsing events_log: {e}")
+        logging.error(f" Error parsing events_log: {e}")
         return False
     
 
@@ -354,7 +354,7 @@ def generate_presigned_url(blob_path: str, expiration: int = 3600) -> str:
         secret_key = os.getenv("HETZNER_SECRET_KEY")
         bucket_name = os.getenv("HETZNER_BUCKET_NAME")
         
-        # 🔥 FIX: For recordings, use path-style endpoint (without bucket subdomain)
+        # FIX: For recordings, use path-style endpoint (without bucket subdomain)
         # For other files (avatars, transcripts), use virtual-hosted style
         if blob_path.startswith("recordings/"):
             # Remove bucket subdomain for path-style URLs (matches LiveKit upload)
@@ -377,11 +377,11 @@ def generate_presigned_url(blob_path: str, expiration: int = 3600) -> str:
             ExpiresIn=expiration
         )
         
-        logging.info(f"✅ Generated presigned URL (expires in {expiration}s): {blob_path}")
+        logging.info(f" Generated presigned URL (expires in {expiration}s): {blob_path}")
         return url
         
     except Exception as e:
-        logging.error(f"❌ Failed to generate presigned URL: {e}")
+        logging.error(f" Failed to generate presigned URL: {e}")
         traceback.print_exc()
         return None
 
@@ -404,7 +404,7 @@ class HetznerAvatarStorage:
     def __init__(self):
         self.bucket_name = os.getenv("HETZNER_BUCKET_NAME")
         self.s3_client = get_s3_client()
-        logging.info(f"✅ Hetzner Avatar Storage initialized: {self.bucket_name}")
+        logging.info(f" Hetzner Avatar Storage initialized: {self.bucket_name}")
     
     def upload_avatar(self, file_content: bytes, file_extension: str) -> str:
         """
@@ -433,11 +433,11 @@ class HetznerAvatarStorage:
                 CacheControl='public, max-age=31536000'
             )
             
-            logging.info(f"✅ Uploaded avatar: {filename}")
+            logging.info(f" Uploaded avatar: {filename}")
             return filename  # Return KEY, not URL
             
         except Exception as e:
-            logging.error(f"❌ Avatar upload failed: {e}")
+            logging.error(f" Avatar upload failed: {e}")
             raise
     
     def delete_avatar(self, object_key: str) -> bool:
@@ -452,10 +452,10 @@ class HetznerAvatarStorage:
                 Bucket=self.bucket_name,
                 Key=object_key
             )
-            logging.info(f"✅ Deleted avatar: {object_key}")
+            logging.info(f" Deleted avatar: {object_key}")
             return True
         except Exception as e:
-            logging.error(f"❌ Delete failed: {e}")
+            logging.error(f" Delete failed: {e}")
             return False
 
 # Replace singleton
@@ -490,3 +490,50 @@ def serialize_agent_data(agent: dict) -> dict:
         agent[key] = convert_value(value)
     
     return agent
+
+async def fetch_calendar_events_for_agent(agent_id: int):
+    try:
+        agent = await asyncio.to_thread(db.get_agent_by_id, agent_id)
+        if not agent:
+            logging.warning(f"Agent {agent_id} not found")
+            return None
+        
+        user_id = agent.get('user_id') or agent.get('admin_id')
+        if not user_id:
+            logging.info(f"No user associated with agent {agent_id}")
+            return None
+        
+        credentials = await asyncio.to_thread(db.get_google_credentials, user_id)
+        if not credentials:
+            logging.info(f"No Google credentials for user {user_id}")
+            return None
+        
+        from services.google_calendar_service import GoogleCalendarService
+        
+        def _fetch_events():
+            calendar_service = GoogleCalendarService(credentials)
+            time_min = datetime.now(timezone.utc)
+            time_max = datetime.now(timezone.utc) + timedelta(days=30)
+            events = calendar_service.list_events(time_min=time_min, time_max=time_max, max_results=100)
+            updated_creds = calendar_service.get_updated_credentials()
+            return events, updated_creds
+        
+        events, updated_creds = await asyncio.to_thread(_fetch_events)
+        
+        if updated_creds['access_token'] != credentials['access_token']:
+            await asyncio.to_thread(
+                db.save_google_credentials,
+                user_id=user_id,
+                access_token=updated_creds['access_token'],
+                refresh_token=updated_creds['refresh_token'],
+                token_expiry=updated_creds['token_expiry'],
+                scopes=updated_creds.get('scopes')
+            )
+        
+        logging.info(f"Fetched {len(events)} calendar events for agent {agent_id}")
+        return events
+        
+    except Exception as e:
+        logging.error(f"Error fetching calendar for agent {agent_id}: {e}")
+        traceback.print_exc()
+        return None

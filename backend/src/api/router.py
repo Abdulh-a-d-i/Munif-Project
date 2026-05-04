@@ -34,13 +34,17 @@ from src.api.base_models import (
     CreateAgentRequest,
     ResetPasswordRequest,
     ForgotPasswordRequest,
-    ContactFormRequest
+    ContactFormRequest,
+    ToggleAgentStatusRequest,
+    BusinessDetailsRequest,
+    UpdateAdminStatusRequest
 )
 from src.utils.db import PGDB 
 from src.utils.mail_management import Send_Mail
 from src.utils.jwt_utils import create_access_token
 from src.utils.utils import (
     get_current_user, 
+    require_admin,
     add_call_event, 
     fetch_and_store_transcript, 
     fetch_and_store_recording, 
@@ -104,193 +108,349 @@ def add_presigned_urls_to_call(call: dict) -> dict:
     
     return call
 
-# ==================== AUTH ENDPOINTS ====================
-@router.post("/register")
-def register_user(user: UserRegister):
-    user_dict = user.dict()
-    user_dict["email"] = user_dict["email"].strip().lower()
-    user_dict["username"] = user_dict["username"].strip().lower()
-    user_dict['is_admin'] = True
-    try:
-        db.register_user(user_dict)
-        return JSONResponse(status_code=201, content={"message": "You are registered successfully."})
-    except ValueError as ve:
-        return error_response(status_code=400, message=str(ve))
-    except Exception as e:
-        traceback.print_exc()
-        return error_response(status_code=500, message=f"Registration failed: {str(e)}")
-
-@router.post("/login", response_model=LoginResponse)
-def login_user(user: UserLogin):
-    try:
-        user_dict = {
-            "email": user.email,
-            "password": user.password
-        }
-        logging.info(f"User dict: {user_dict}")
-        user_dict["email"] = user_dict["email"].strip().lower()
-        result = db.login_user(user_dict)
-        if not result:
-            return error_response("Invalid username or password", status_code=422)
-        
-        token = create_access_token({"sub": str(result["id"])})
-        return {
-            "access_token": token,
-            "token_type": "bearer",
-            "user": result
-        }
-    except ValueError as ve:
-        return error_response(str(ve), status_code=422)
-    except Exception as e:
-        logging.error(f"Error during login: {str(e)}")
-        return error_response(f"Internal server error: {str(e)}", status_code=500)
-
-# ==================== CALL STATUS ====================
-@router.get("/call-status/{call_id}")
-async def get_call_status(call_id: str):
-    """Optimized status check with proper connection handling"""
-    try:
-        conn = db.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT status, created_at, ended_at, duration, started_at
-                    FROM call_history 
-                    WHERE call_id = %s
-                """, (call_id,))
-                row = cursor.fetchone()
-        finally:
-            db.release_connection(conn)
-        
-        if not row:
-            return JSONResponse(
-                status_code=404,
-                content={"status": "not_found", "is_final": True}
-            )
-        
-        current_status, created_at, ended_at, duration, started_at = row
-        
-        # Normalize status
-        if current_status not in {"initialized", "dialing", "connected", "completed", "unanswered"}:
-            STATUS_MAP = {
-                "initiated": "initialized",
-                "in_progress": "connected",
-                "failed": "unanswered",
-                "not_attended": "unanswered"
-            }
-            current_status = STATUS_MAP.get(current_status, "initialized")
-        
-        # Calculate elapsed time
-        time_elapsed = 0
-        if created_at:
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
-            time_elapsed = (datetime.now(timezone.utc) - created_at).total_seconds()
-        
-        is_final = current_status in {"completed", "unanswered"}
-        
-        response = {
-            "status": current_status,
-            "message": {
-                "initialized": "Initializing...",
-                "dialing": "Dialing...",
-                "connected": "Call in progress",
-                "completed": "Call completed",
-                "unanswered": "Call not answered"
-            }.get(current_status, current_status),
-            "time_elapsed": round(time_elapsed, 1),
-            "is_final": is_final
-        }
-        
-        if is_final and duration:
-            response["duration"] = round(duration, 1)
-        
-        if started_at:
-            response["started_at"] = started_at.isoformat()
-        if ended_at:
-            response["ended_at"] = ended_at.isoformat()
-        
-        return JSONResponse(response)
-    except Exception as e:
-        logging.error(f"get_call_status error: {e}")
-        return JSONResponse(
-            {"status": "error", "message": str(e), "is_final": True},
-            status_code=500
-        )
-
-# ==================== CALL HISTORY ====================
-@router.get("/call-history")
-async def get_user_call_history(
+# ==================== ADMIN USER MANAGEMENT ====================
+@router.get("/admin/users")
+async def get_all_users_admin(
     page: int = Query(1, ge=1),
-    page_size: int = Query(10, le=100),
-    user=Depends(get_current_user)
+    page_size: int = Query(20, ge=1, le=100),
+    search: str = Query(None),
+    current_user: dict = Depends(require_admin)
 ):
-    """Get call history for all agents belonging to the logged-in admin"""
+    """
+    Get paginated list of all users (admin only).
+    Supports search by username or email.
+    Includes agent name and onboarding status for each user.
+    
+    Requires: Admin authentication
+    """
     try:
-        history = db.get_call_history_by_admin(user["id"], page, page_size)
-
-        calls = []
-        for call in history.get("calls", []):
-            call_data = {**call}
+        result = db.get_all_users(page=page, page_size=page_size, search=search)
+        
+        # Format timestamps and add computed fields
+        for user in result.get("users", []):
+            # Format timestamp
+            if user.get("created_at"):
+                user["created_at"] = user["created_at"].isoformat() if hasattr(user["created_at"], 'isoformat') else str(user["created_at"])
             
-            # Format timestamps
-            for field in ["created_at", "started_at", "ended_at"]:
-                if call.get(field):
-                    call_data[field] = call[field].isoformat() if hasattr(call[field], 'isoformat') else str(call[field])
+            # Add onboarding status as boolean
+            user["onboarding_completed"] = bool(user.get("is_check", False))
             
-            # Calculate display duration if not available
-            if not call_data.get("duration") and call.get("started_at") and call.get("ended_at"):
-                try:
-                    start = call["started_at"] if isinstance(call["started_at"], datetime) else datetime.fromisoformat(str(call["started_at"]))
-                    end = call["ended_at"] if isinstance(call["ended_at"], datetime) else datetime.fromisoformat(str(call["ended_at"]))
-                    call_data["duration"] = round((end - start).total_seconds(), 1)
-                except:
-                    call_data["duration"] = 0
-            
-            # Parse transcript from JSONB
-            transcript_text = None
-            if call.get("transcript"):
-                try:
-                    tr = call["transcript"]
-                    if isinstance(tr, str):
-                        tr = json.loads(tr)
-                    if isinstance(tr, list):
-                        lines = []
-                        for msg in tr:
-                            if msg.get("type") == "message":
-                                speaker = "Assistant" if msg.get("role") == "assistant" else "User"
-                                text = " ".join(msg.get("content", [])) if isinstance(msg.get("content"), list) else str(msg.get("content"))
-                                lines.append(f"{speaker}: {text}")
-                        transcript_text = "\n".join(lines)
-                except Exception as e:
-                    logging.warning(f"Transcript parse error for {call.get('id')}: {e}")
-            
-            call_data["transcript_text"] = transcript_text
-            call_data["has_recording"] = bool(call.get("recording_blob"))
-            
-            # 🔥 ADD PRESIGNED URLS
-            call_data = add_presigned_urls_to_call(call_data)
-            
-            calls.append(call_data)
-
-        pagination = history.get("pagination") or {
-            "page": history.get("page", page),
-            "page_size": history.get("page_size", page_size),
-            "total": history.get("total", len(calls)),
-            "completed_calls": history.get("completed_calls", 0),
-            "not_completed_calls": history.get("not_completed_calls", 0),
-        }
-
-        return JSONResponse(content=jsonable_encoder({
-            "user_id": user["id"],
-            "pagination": pagination,
-            "calls": calls
-        }))
-
+            # Agent name already included from LEFT JOIN, will be None if no agent
+            if not user.get("agent_name"):
+                user["agent_name"] = None
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "data": result
+            }
+        )
+        
     except Exception as e:
-        logging.error(f"Error fetching history: {e}")
+        logging.error(f"Error fetching users: {str(e)}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        return error_response(f"Failed to fetch users: {str(e)}", status_code=500)
+
+
+@router.post("/admin/create-user")
+async def create_user_by_admin(
+    email: str,
+    username: str,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+    current_user: dict = Depends(require_admin)
+):
+    """
+    Admin endpoint to create a new user account.
+    Generates a temporary password and sends welcome email to the new user.
+    
+    Requires: Admin authentication
+    Returns: Created user info (password not included in response for security)
+    """
+    try:
+        import secrets
+        import string
+        
+        # Generate secure temporary password
+        # 12 characters with mix of uppercase, lowercase, digits, and special chars
+        alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+        temp_password = ''.join(secrets.choice(alphabet) for _ in range(12))
+        
+        # Clean and validate email
+        email = email.strip().lower()
+        username = username.strip().lower()
+        
+        # Create user in database
+        user_data = {
+            "email": email,
+            "username": username,
+            "password": temp_password,
+            "is_admin": False
+        }
+        
+        try:
+            created_user = db.register_user(user_data)
+        except ValueError as e:
+            # Email already exists
+            return error_response(str(e), status_code=400)
+        
+        # Send welcome email with credentials
+        login_url = os.getenv("FRONTEND_URL", "https://mrbot-ki.de") + "/login"
+        display_name = first_name or username
+        
+        email_sent = await mail_obj.send_welcome_email(
+            user_email=email,
+            user_name=display_name,
+            temp_password=temp_password,
+            login_url=login_url
+        )
+        
+        if not email_sent:
+            logging.warning(f" User created but email failed for {email}")
+            # Still return success since user was created
+        
+        logging.info(f" Admin {current_user['email']} created user: {email}")
+        
+        return JSONResponse(
+            status_code=201,
+            content={
+                "success": True,
+                "message": f"User account created successfully. Welcome email sent to {email}",
+                "user": {
+                    "id": created_user["id"],
+                    "username": created_user["username"],
+                    "email": created_user["email"],
+                    "created_at": created_user["created_at"].isoformat() if hasattr(created_user.get("created_at"), 'isoformat') else str(created_user.get("created_at"))
+                },
+                "temp_password": temp_password,  # Include password for admin to share with user
+                "email_sent": email_sent
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f" Error creating user: {str(e)}")
+        traceback.print_exc()
+        return error_response(f"Failed to create user: {str(e)}", status_code=500)
+
+
+@router.get("/users/list")
+
+async def get_users_list(current_user: dict = Depends(get_current_user)):
+    """
+    Get simplified list of all users for dropdowns.
+    Available to all authenticated users.
+    """
+    try:
+        # Use the existing DB method
+        users = db.get_all_users_simple()
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "users": users
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f"Error fetching users list: {str(e)}")
+        traceback.print_exc()
+        return error_response(f"Failed to fetch users list: {str(e)}", status_code=500)
+
+
+# @router.patch("/admin/users/{user_id}/admin-status")
+# async def update_user_admin_status_endpoint(
+#     user_id: int,
+#     request: UpdateAdminStatusRequest,
+#     current_user: dict = Depends(require_admin)
+# ):
+#     """
+#     Promote or demote user to admin status (admin only).
+#     Cannot remove own admin status.
+    
+#     Requires: Admin authentication
+#     """
+#     try:
+#         admin_id = current_user.get("id")
+        
+#         # Update user admin status
+#         updated_user = db.update_user_admin_status(
+#             user_id=user_id,
+#             is_admin=request.is_admin,
+#             admin_id=admin_id
+#         )
+        
+#         # Format created_at
+#         if updated_user.get("created_at"):
+#             updated_user["created_at"] = updated_user["created_at"].isoformat() if hasattr(updated_user["created_at"], 'isoformat') else str(updated_user["created_at"])
+        
+#         action = "promoted to admin" if request.is_admin else "demoted from admin"
+        
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "message": f"User {action} successfully",
+#                 "user": updated_user
+#             }
+#         )
+        
+#     except ValueError as ve:
+#         # Validation errors (self-demotion, user not found, etc.)
+#         return error_response(str(ve), status_code=400)
+#     except Exception as e:
+#         logging.error(f"Error updating user admin status: {str(e)}")
+#         traceback.print_exc()
+#         return error_response(f"Failed to update admin status: {str(e)}", status_code=500)
+
+
+# # ==================== CALL STATUS ====================
+# @router.get("/call-status/{call_id}")
+# async def get_call_status(call_id: str):
+#     """Optimized status check with proper connection handling"""
+#     try:
+#         conn = db.get_connection()
+#         try:
+#             with conn.cursor() as cursor:
+#                 cursor.execute("""
+#                     SELECT status, created_at, ended_at, duration, started_at
+#                     FROM call_history 
+#                     WHERE call_id = %s
+#                 """, (call_id,))
+#                 row = cursor.fetchone()
+#         finally:
+#             db.release_connection(conn)
+        
+#         if not row:
+#             return JSONResponse(
+#                 status_code=404,
+#                 content={"status": "not_found", "is_final": True}
+#             )
+        
+#         current_status, created_at, ended_at, duration, started_at = row
+        
+#         # Normalize status
+#         if current_status not in {"initialized", "dialing", "connected", "completed", "unanswered"}:
+#             STATUS_MAP = {
+#                 "initiated": "initialized",
+#                 "in_progress": "connected",
+#                 "failed": "unanswered",
+#                 "not_attended": "unanswered"
+#             }
+#             current_status = STATUS_MAP.get(current_status, "initialized")
+        
+#         # Calculate elapsed time
+#         time_elapsed = 0
+#         if created_at:
+#             if created_at.tzinfo is None:
+#                 created_at = created_at.replace(tzinfo=timezone.utc)
+#             time_elapsed = (datetime.now(timezone.utc) - created_at).total_seconds()
+        
+#         is_final = current_status in {"completed", "unanswered"}
+        
+#         response = {
+#             "status": current_status,
+#             "message": {
+#                 "initialized": "Initializing...",
+#                 "dialing": "Dialing...",
+#                 "connected": "Call in progress",
+#                 "completed": "Call completed",
+#                 "unanswered": "Call not answered"
+#             }.get(current_status, current_status),
+#             "time_elapsed": round(time_elapsed, 1),
+#             "is_final": is_final
+#         }
+        
+#         if is_final and duration:
+#             response["duration"] = round(duration, 1)
+        
+#         if started_at:
+#             response["started_at"] = started_at.isoformat()
+#         if ended_at:
+#             response["ended_at"] = ended_at.isoformat()
+        
+#         return JSONResponse(response)
+#     except Exception as e:
+#         logging.error(f"get_call_status error: {e}")
+#         return JSONResponse(
+#             {"status": "error", "message": str(e), "is_final": True},
+#             status_code=500
+#         )
+
+# # ==================== CALL HISTORY ====================
+# @router.get("/call-history")
+# async def get_user_call_history(
+#     page: int = Query(1, ge=1),
+#     page_size: int = Query(10, le=100),
+#     user=Depends(get_current_user)
+# ):
+#     """Get call history for all agents belonging to the logged-in admin"""
+#     try:
+#         history = db.get_call_history_by_admin(user["id"], page, page_size)
+
+#         calls = []
+#         for call in history.get("calls", []):
+#             call_data = {**call}
+            
+#             # Format timestamps
+#             for field in ["created_at", "started_at", "ended_at"]:
+#                 if call.get(field):
+#                     call_data[field] = call[field].isoformat() if hasattr(call[field], 'isoformat') else str(call[field])
+            
+#             # Calculate display duration if not available
+#             if not call_data.get("duration") and call.get("started_at") and call.get("ended_at"):
+#                 try:
+#                     start = call["started_at"] if isinstance(call["started_at"], datetime) else datetime.fromisoformat(str(call["started_at"]))
+#                     end = call["ended_at"] if isinstance(call["ended_at"], datetime) else datetime.fromisoformat(str(call["ended_at"]))
+#                     call_data["duration"] = round((end - start).total_seconds(), 1)
+#                 except:
+#                     call_data["duration"] = 0
+            
+#             # Parse transcript from JSONB
+#             transcript_text = None
+#             if call.get("transcript"):
+#                 try:
+#                     tr = call["transcript"]
+#                     if isinstance(tr, str):
+#                         tr = json.loads(tr)
+#                     if isinstance(tr, list):
+#                         lines = []
+#                         for msg in tr:
+#                             if msg.get("type") == "message":
+#                                 speaker = "Assistant" if msg.get("role") == "assistant" else "User"
+#                                 text = " ".join(msg.get("content", [])) if isinstance(msg.get("content"), list) else str(msg.get("content"))
+#                                 lines.append(f"{speaker}: {text}")
+#                         transcript_text = "\n".join(lines)
+#                 except Exception as e:
+#                     logging.warning(f"Transcript parse error for {call.get('id')}: {e}")
+            
+#             call_data["transcript_text"] = transcript_text
+#             call_data["has_recording"] = bool(call.get("recording_blob"))
+            
+#             # ADD PRESIGNED URLS
+#             call_data = add_presigned_urls_to_call(call_data)
+            
+#             calls.append(call_data)
+
+#         pagination = history.get("pagination") or {
+#             "page": history.get("page", page),
+#             "page_size": history.get("page_size", page_size),
+#             "total": history.get("total", len(calls)),
+#             "completed_calls": history.get("completed_calls", 0),
+#             "not_completed_calls": history.get("not_completed_calls", 0),
+#         }
+
+#         return JSONResponse(content=jsonable_encoder({
+#             "user_id": user["id"],
+#             "pagination": pagination,
+#             "calls": calls
+#         }))
+
+#     except Exception as e:
+#         logging.error(f"Error fetching history: {e}")
+#         traceback.print_exc()
+#         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== AGENT EVENT REPORTING ====================
 @router.post("/agent/report-event")
@@ -392,13 +552,13 @@ async def save_call_data(request: Request):
     This receives:
     - transcript_blob: Path in Hetzner bucket
     - recording_blob: Path in Hetzner bucket
-    - call_duration_seconds: ACCURATE duration from agent (SIP participant join → leave)
+    - call_duration_seconds: ACCURATE duration from agent (SIP participant join  leave)
     - agent_id: To update used_minutes
     
     Backend will:
     1. Store paths + duration in DB
     2. Update agent's used_minutes (accumulative)
-    3. Download transcript after 5s delay → Store JSONB in DB
+    3. Download transcript after 5s delay  Store JSONB in DB
     """
     try:
         data = await request.json()
@@ -432,7 +592,7 @@ async def save_call_data(request: Request):
         if call_duration_seconds is not None:
             updates["duration"] = float(call_duration_seconds)
             logging.info(
-                f"⏱️ Call {call_id}: Duration = {call_duration_seconds:.2f}s "
+                f" Call {call_id}: Duration = {call_duration_seconds:.2f}s "
                 f"({call_duration_seconds / 60:.2f} min)"
             )
         
@@ -454,7 +614,7 @@ async def save_call_data(request: Request):
         
         if updates:
             db.update_call_history(call_id, updates)
-            logging.info(f"✅ Call history updated for {call_id}")
+            logging.info(f" Call history updated for {call_id}")
         
         # Update agent's used_minutes (ACCUMULATIVE)
         if agent_id and call_duration_seconds and call_duration_seconds > 0:
@@ -473,20 +633,20 @@ async def save_call_data(request: Request):
                 new_used = new_check["used_minutes"]
                 
                 logging.info(
-                    f"✅ Agent {agent_id} minutes updated: "
-                    f"{old_used:.2f} → {new_used:.2f} min "
+                    f" Agent {agent_id} minutes updated: "
+                    f"{old_used:.2f}  {new_used:.2f} min "
                     f"(+{duration_minutes:.2f} min from call {call_id})"
                 )
                 
                 # Warn if approaching limit
                 if new_check["remaining_minutes"] < 60:  # Less than 1 hour
                     logging.warning(
-                        f"⚠️ Agent {agent_id} low on minutes: "
+                        f" Agent {agent_id} low on minutes: "
                         f"{new_check['remaining_minutes']:.1f} min remaining"
                     )
                 
             except Exception as e:
-                logging.error(f"❌ Failed to update agent minutes: {e}")
+                logging.error(f" Failed to update agent minutes: {e}")
                 traceback.print_exc()
                 # Don't fail the entire request if minutes update fails
         
@@ -494,7 +654,7 @@ async def save_call_data(request: Request):
         if transcript_blob:
             async def delayed_transcript():
                 await asyncio.sleep(5)
-                logging.info(f"📥 Downloading transcript for {call_id}")
+                logging.info(f" Downloading transcript for {call_id}")
                 await fetch_and_store_transcript(call_id, None, transcript_blob)
             asyncio.create_task(delayed_transcript())
         
@@ -520,8 +680,9 @@ async def get_agent_call_history(
     """Get call history for a specific agent"""
     try:
         agent = db.get_agent_by_id(agent_id)
-        if not agent or agent["admin_id"] != user["id"]:
-            raise HTTPException(status_code=403, detail="Access denied")
+        
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
         
         history = db.get_call_history_by_agent(agent_id, page, page_size)
         
@@ -532,7 +693,10 @@ async def get_agent_call_history(
             # Format timestamps
             for field in ["created_at", "started_at", "ended_at"]:
                 if call.get(field):
-                    call_data[field] = call[field].isoformat()
+                    if isinstance(call[field], datetime):
+                        call_data[field] = call[field].isoformat()
+                    else:
+                        call_data[field] = str(call[field])
             
             # Calculate duration if missing
             if not call_data.get("duration") and call.get("started_at") and call.get("ended_at"):
@@ -555,7 +719,8 @@ async def get_agent_call_history(
                         for msg in tr:
                             if msg.get("type") == "message":
                                 speaker = "Assistant" if msg.get("role") == "assistant" else "User"
-                                text = " ".join(msg.get("content", [])) if isinstance(msg.get("content"), list) else str(msg.get("content"))
+                                content = msg.get("content", "")
+                                text = " ".join(content) if isinstance(content, list) else str(content)
                                 lines.append(f"{speaker}: {text}")
                         transcript_text = "\n".join(lines)
                 except Exception as e:
@@ -564,7 +729,7 @@ async def get_agent_call_history(
             call_data["transcript_text"] = transcript_text
             call_data["has_recording"] = bool(call.get("recording_blob"))
             
-            # 🔥 ADD PRESIGNED URLS
+            # Presigned URLs for recordings/assets
             call_data = add_presigned_urls_to_call(call_data)
             
             calls.append(call_data)
@@ -572,14 +737,14 @@ async def get_agent_call_history(
         return JSONResponse(content=jsonable_encoder({
             "success": True,
             "agent_id": agent_id,
-            "agent_name": agent["agent_name"],
-            "phone_number": agent["phone_number"],
+            "agent_name": agent.get("agent_name"),
+            "phone_number": agent.get("phone_number"),
             "pagination": {
-                "page": history["page"],
-                "page_size": history["page_size"],
-                "total": history["total"],
-                "completed_calls": history["completed_calls"],
-                "not_completed_calls": history["not_completed_calls"]
+                "page": history.get("page", 1),
+                "page_size": history.get("page_size", 10),
+                "total": history.get("total", 0),
+                "completed_calls": history.get("completed_calls", 0),
+                "not_completed_calls": history.get("not_completed_calls", 0)
             },
             "calls": calls
         }))
@@ -590,26 +755,35 @@ async def get_agent_call_history(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/agent/config/{phone_number}")
 async def get_agent_config(phone_number: str):
     """
-    Fetch agent configuration by phone number.
-    ✅ Checks minutes availability - blocks if exhausted.
-    ❌ Does NOT send minutes info to agent (security)
+    Fetch agent configuration by phone number with calendar events.
+    Fetches calendar in parallel to minimize latency.
     """
     try:
         agent = db.get_agent_by_phone(phone_number)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         
-        # 🔥 Check if agent has available minutes
         agent_id = agent.get("agent_id")
-        minutes_check = db.check_agent_minutes_available(agent_id)
         
-        # ❌ Block if no minutes remaining
+        minutes_task = asyncio.create_task(
+            asyncio.to_thread(db.check_agent_minutes_available, agent_id)
+        )
+        
+        from src.utils.utils import fetch_calendar_events_for_agent
+        calendar_task = asyncio.create_task(fetch_calendar_events_for_agent(agent_id))
+        
+        minutes_check, calendar_events = await asyncio.gather(
+            minutes_task,
+            calendar_task
+        )
+        
         if not minutes_check["available"]:
             logging.warning(
-                f"⛔ Agent {agent_id} ({phone_number}): "
+                f" Agent {agent_id} ({phone_number}): "
                 f"No minutes remaining ({minutes_check['used_minutes']}/{minutes_check['allowed_minutes']})"
             )
             raise HTTPException(
@@ -617,16 +791,16 @@ async def get_agent_config(phone_number: str):
                 detail="Agent minutes exhausted"
             )
         
-        # ✅ Minutes available - send config WITHOUT minutes info
         logging.info(
-            f"✅ Agent {agent_id} config sent - "
+            f" Agent {agent_id} config sent - "
             f"{minutes_check['remaining_minutes']:.1f} minutes remaining"
         )
         agent = serialize_agent_data(dict(agent))
 
         return JSONResponse({
             "success": True,
-            "agent": agent
+            "agent": agent,
+            "calendar_events": calendar_events or []
         })
         
     except HTTPException:
@@ -659,9 +833,9 @@ async def new_call(
             if '@' in cleaned_caller:
                 cleaned_caller = cleaned_caller.split('@')[0].replace('sip:', '')
             
-            logging.info(f"📞 Call from {cleaned_caller} to agent {agent['agent_id']}")
+            logging.info(f" Call from {cleaned_caller} to agent {agent['agent_id']}")
         else:
-            logging.info(f"📞 Call from unknown number to agent {agent['agent_id']}")
+            logging.info(f" Call from unknown number to agent {agent['agent_id']}")
         
         # INSERT call history with caller_number
         db.insert_call_history(
@@ -687,13 +861,13 @@ async def new_call(
 async def get_dashboard_analytics(current_user: dict = Depends(get_current_user)):
     """
     Get overall dashboard analytics.
-    ✅ Now includes minutes info for top agents.
+    Now includes minutes info for top agents.
     """
     try:
         user_id = current_user["id"]
         analytics = db.get_admin_dashboard_analytics(user_id)
         
-        # 🔥 ADD MINUTES INFO TO TOP AGENTS
+        # ADD MINUTES INFO TO TOP AGENTS
         for agent in analytics.get("top_agents", []):
             # Add presigned URLs
             if agent.get("avatar_url"):
@@ -731,13 +905,13 @@ async def get_all_agents(
 ):
     """
     Get paginated list of all agents with call statistics.
-    ✅ Now includes minutes info for each agent.
+    Now includes minutes info for each agent.
     """
     try:
         user_id = current_user["id"]
         result = db.get_agents_with_call_stats(user_id, page, page_size)
         
-        # 🔥 NEW: Add minutes info to each agent
+        # NEW: Add minutes info to each agent
         for agent in result.get("agents", []):
             # Add presigned URLs
             add_presigned_urls_to_agent(agent)
@@ -828,7 +1002,7 @@ async def create_agent(
     agent_name: str = Form(...),
     phone_number: str = Form(...),
     system_prompt: str = Form(...),
-    voice_type: str = Form(...),
+    voice_type: str = Form(None),  # Optional - can be empty
     language: str = Form("en"),
     industry: str = Form(None),
     owner_name: str = Form(None),
@@ -836,15 +1010,24 @@ async def create_agent(
     business_hours_start: str = Form(None),  # NEW (format: "09:00")
     business_hours_end: str = Form(None),    # NEW (format: "17:00")
     allowed_minutes: int = Form(0),          # NEW
+    user_id: int = Form(None),               # NEW: Assign to user
     avatar: UploadFile = File(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_admin)  # Admin only - users cannot create agents
 ):
     """
     Create a new agent with optional avatar image.
-    ✅ Now includes owner_email, business_hours, and allowed_minutes.
+    ADMIN ONLY - Users cannot create agents.
+    Includes owner_email, business_hours, and allowed_minutes.
+    user_id: Select a user from dropdown to assign this agent to them.
+    voice_type is optional - defaults to 'female' if not provided.
     """
     try:
-        user_id = current_user["id"]
+        admin_id = current_user["id"]
+        assign_to_user_id = user_id  # user_id from form (dropdown selection)
+        
+        # Set default voice_type if not provided
+        if not voice_type:
+            voice_type = "female"
         
         # Check if phone number already exists
         existing = db.get_agent_by_phone(phone_number)
@@ -866,6 +1049,12 @@ async def create_agent(
                 return error_response("Invalid business_hours_start format. Use HH:MM", 400)
             if not re.match(time_pattern, business_hours_end):
                 return error_response("Invalid business_hours_end format. Use HH:MM", 400)
+        
+        # Validate user_id if provided (user selected from dropdown)
+        if assign_to_user_id:
+            user = db.get_user_by_id(assign_to_user_id)
+            if not user:
+                return error_response(f"User with ID {assign_to_user_id} not found", 404)
         
         # Validate allowed_minutes
         if allowed_minutes < 0:
@@ -889,9 +1078,9 @@ async def create_agent(
             
             try:
                 avatar_key = hetzner_storage.upload_avatar(content, file_extension)
-                logging.info(f"✅ Avatar uploaded with key: {avatar_key}")
+                logging.info(f" Avatar uploaded with key: {avatar_key}")
             except Exception as e:
-                logging.error(f"❌ Avatar upload failed: {e}")
+                logging.error(f" Avatar upload failed: {e}")
                 return error_response("Failed to upload avatar", 500)
         
         # Create agent data
@@ -903,22 +1092,59 @@ async def create_agent(
             "language": language,
             "industry": industry,
             "owner_name": owner_name,
-            "owner_email": owner_email,  # NEW
+            "owner_email": owner_email,
             "avatar_url": avatar_key,
-            "business_hours_start": business_hours_start,  # NEW
-            "business_hours_end": business_hours_end,      # NEW
-            "allowed_minutes": allowed_minutes,            # NEW
-            "admin_id": user_id
+            "business_hours_start": business_hours_start,
+            "business_hours_end": business_hours_end,
+            "allowed_minutes": allowed_minutes,
+            "user_id": assign_to_user_id,  # User selected from dropdown
+            "admin_id": admin_id  # Admin creating the agent
         }
         
         # Save to database
         agent = db.create_agent_with_voice_type(agent_data)
         
-        # 🔥 FIX: Serialize time objects before JSON response
+        # Update user's agent_id if user was assigned
+        if assign_to_user_id:
+            try:
+                db.update_user_agent_id(assign_to_user_id, agent['agent_id'])
+                logging.info(f" Linked User {assign_to_user_id} to Agent {agent['agent_id']}")
+            except Exception as link_error:
+                # Don't fail agent creation if linking fails
+                logging.error(f" Failed to link user to agent: {link_error}")
+        
+        # FIX: Serialize time objects before JSON response
         agent = serialize_agent_data(agent)
         
         # Add presigned URL for response
         add_presigned_urls_to_agent(agent)
+        
+        # Send email notification to business owner if owner_email is provided
+        if owner_email:
+            try:
+                logging.info(f" Sending agent creation email to {owner_email}")
+                email_sent = await mail_obj.send_agent_created_email(
+                    owner_email=owner_email,
+                    owner_name=owner_name or "Valued Customer",
+                    agent_name=agent_name,
+                    phone_number=phone_number,
+                    voice_type=voice_type,
+                    language=language,
+                    industry=industry
+                )
+                
+                if email_sent:
+                    logging.info(f" Agent creation email sent successfully to {owner_email}")
+                else:
+                    logging.warning(f" Failed to send agent creation email to {owner_email}")
+            except Exception as email_error:
+                # Don't fail the entire agent creation if email fails
+                logging.error(f" Error sending agent creation email: {email_error}")
+                traceback.print_exc()
+        
+        # Rename 'id' to 'agent_id' for consistency in response
+        if 'id' in agent:
+            agent['agent_id'] = agent.pop('id')
         
         return JSONResponse(
             status_code=201,
@@ -948,32 +1174,50 @@ async def update_agent(
     language: str = Form(None),
     industry: str = Form(None),
     owner_name: str = Form(None),
-    owner_email: str = Form(None),  # NEW
-    business_hours_start: str = Form(None),  # NEW
-    business_hours_end: str = Form(None),    # NEW
-    allowed_minutes: int = Form(None),       # NEW
+    owner_email: str = Form(None),
+    business_hours_start: str = Form(None),
+    business_hours_end: str = Form(None),
+    allowed_minutes: int = Form(None),
+    user_id: int = Form(None),  # For admin to update user assignment
     avatar: UploadFile = File(None),
     current_user: dict = Depends(get_current_user)
 ):
     """
     Update agent details with optional new avatar.
-    ✅ Now includes owner_email, business_hours, and allowed_minutes.
-    Note: used_minutes cannot be updated here - use reset endpoint instead.
+    
+    Role-Based Restrictions:
+    - ADMIN: Full access to all fields
+    - USER: Can edit agent_name, system_prompt, voice_type, language, industry, 
+            owner_name, owner_email, avatar. CANNOT edit phone_number, business_hours, 
+            allowed_minutes, or user_id.
     """
     try:
-        user_id = current_user["id"]
+        current_user_id = current_user["id"]
+        is_admin = current_user.get("is_admin", False)
         
         # Get existing agent
         existing_agent = db.get_agent_by_id(agent_id)
-        if not existing_agent or existing_agent["admin_id"] != user_id:
-            return error_response("Agent not found or unauthorized", 404)
+        if not existing_agent:
+            return error_response("Agent not found", 404)
         
-        # Build updates dict
+        # Authorization check based on role
+        if is_admin:
+            # Admin: Must be the admin who created the agent
+            if existing_agent["admin_id"] != current_user_id:
+                logging.error(f"Unauthorized agent update attempt. User {current_user_id} (Admin) tried to update agent {agent_id} owned by {existing_agent['admin_id']}")
+                return error_response("Agent not found or unauthorized", 404)
+        else:
+            # User: Agent must be assigned to this user
+            if existing_agent.get("user_id") != current_user_id:
+                logging.error(f"Unauthorized agent update attempt. User {current_user_id} (User) tried to update agent {agent_id} assigned to {existing_agent.get('user_id')}")
+                return error_response("Agent not found or unauthorized", 404)
+        
+        # Build updates dict with role-based restrictions
         updates = {}
+        
+        # Fields that ALL users can update
         if agent_name is not None:
             updates["agent_name"] = agent_name
-        if phone_number is not None:
-            updates["phone_number"] = phone_number
         if system_prompt is not None:
             updates["system_prompt"] = system_prompt
         if voice_type is not None:
@@ -984,18 +1228,39 @@ async def update_agent(
             updates["industry"] = industry
         if owner_name is not None:
             updates["owner_name"] = owner_name
-        if owner_email is not None:  # NEW
+        if owner_email is not None:
             updates["owner_email"] = owner_email
-        if business_hours_start is not None:  # NEW
-            updates["business_hours_start"] = business_hours_start
-        if business_hours_end is not None:    # NEW
-            updates["business_hours_end"] = business_hours_end
-        if allowed_minutes is not None:       # NEW
-            if allowed_minutes < 0:
-                return error_response("allowed_minutes cannot be negative", 400)
-            updates["allowed_minutes"] = allowed_minutes
         
+        # ADMIN-ONLY fields: phone_number, business_hours, allowed_minutes, user_id
+        if is_admin:
+            if phone_number is not None:
+                updates["phone_number"] = phone_number
+            if business_hours_start is not None:
+                updates["business_hours_start"] = business_hours_start
+            if business_hours_end is not None:
+                updates["business_hours_end"] = business_hours_end
+            if allowed_minutes is not None:
+                if allowed_minutes < 0:
+                    return error_response("allowed_minutes cannot be negative", 400)
+                updates["allowed_minutes"] = allowed_minutes
+            if user_id is not None:
+                # Validate user exists
+                user = db.get_user_by_id(user_id)
+                if not user:
+                    return error_response(f"User with ID {user_id} not found", 404)
+                updates["user_id"] = user_id
+        else:
+            # Non-admin user trying to update restricted fields - return error
+            if phone_number is not None:
+                return error_response("You don't have permission to update phone number", 403)
+            if business_hours_start is not None or business_hours_end is not None:
+                return error_response("You don't have permission to update business hours", 403)
+            if allowed_minutes is not None:
+                return error_response("You don't have permission to update allowed minutes", 403)
+            if user_id is not None:
+                return error_response("You don't have permission to change user assignment", 403)
         
+        # Validate business hours format if provided (admin only)
         if "business_hours_start" in updates:
             import re
             time_pattern = r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$'
@@ -1032,22 +1297,23 @@ async def update_agent(
                     hetzner_storage.delete_avatar(old_avatar_key)
                 
                 updates["avatar_url"] = new_avatar_key
-                logging.info(f"✅ Avatar updated: {new_avatar_key}")
+                logging.info(f" Avatar updated: {new_avatar_key}")
                 
             except Exception as e:
-                logging.error(f"❌ Avatar upload failed: {e}")
+                logging.error(f" Avatar upload failed: {e}")
                 return error_response("Failed to upload avatar", 500)
         
         if not updates:
             return error_response("No fields to update", 400)
         
-        # Update agent
-        result = db.update_agent_with_voice_type(agent_id, user_id, updates)
+        # Update agent - use admin_id for DB update
+        admin_id = existing_agent["admin_id"]
+        result = db.update_agent_with_voice_type(agent_id, admin_id, updates)
         
         if not result:
             return error_response("Update failed", 500)
         
-        # 🔥 FIX: Serialize time objects before JSON response
+        # Serialize time objects before JSON response
         result = serialize_agent_data(result)
         
         # Add presigned URL
@@ -1094,9 +1360,9 @@ async def delete_agent(
         if avatar_key:
             try:
                 hetzner_storage.delete_avatar(avatar_key)
-                logging.info(f"🗑️ Avatar deleted for agent {agent_id}")
+                logging.info(f" Avatar deleted for agent {agent_id}")
             except Exception as e:
-                logging.warning(f"?? Could not delete avatar: {e}")
+                logging.warning(f" Could not delete avatar: {e}")
         
         return JSONResponse(
             status_code=200,
@@ -1111,48 +1377,150 @@ async def delete_agent(
         traceback.print_exc()
         return error_response("Failed to delete agent", 500)
 
-@router.get("/calls/{call_id}")
-async def get_call_details(
-    call_id: str,
-    agent_id: Optional[int] = Query(None),
-    current_user: dict = Depends(get_current_user)
-):
-    """Get complete call details including metadata"""
-    try:
-        user_id = current_user["id"]
+# @router.post("/agents/toggle-status")
+# async def toggle_agent_status(
+#     request: ToggleAgentStatusRequest,
+#     current_user: dict = Depends(get_current_user)
+# ):
+#     """
+#     Toggle agent active/inactive status for the current user.
+#     When user presses active/inactive button, this updates their personal
+#     activation status for the agent.
+#     """
+#     try:
+#         user_id = current_user["id"]
+#         agent_id = request.agent_id
+#         is_active = request.is_active
         
-        call = db.get_call_by_id(call_id, agent_id)
+#         # Admin Override: Allow setting status for another user
+#         if request.user_id:
+#             is_admin = current_user.get("is_admin") or current_user.get("role") == "admin"
+#             if is_admin:
+#                 logging.info(f"Admin {current_user['id']} toggling agent {agent_id} status for User {request.user_id}")
+#                 user_id = request.user_id
+#             else:
+#                 return error_response("Unauthorized: Only admins can specify user_id", 403)
         
-        if not call:
-            return error_response("Call not found", 404)
+#         # Toggle the status in the database
+#         result = db.toggle_agent_status_for_user(user_id, agent_id, is_active)
         
-        # Verify ownership
-        agent = db.get_agent_by_id(call["agent_id"])
-        if not agent or agent["admin_id"] != user_id:
-            return error_response("Unauthorized", 403)
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "message": f"Agent {'activated' if is_active else 'deactivated'} successfully",
+#                 "data": result
+#             }
+#         )
         
-        # 🔥 FORMAT TIMESTAMPS BEFORE ADDING PRESIGNED URLS
-        for field in ["created_at", "started_at", "ended_at", "updated_at"]:
-            if call.get(field):
-                if hasattr(call[field], 'isoformat'):
-                    call[field] = call[field].isoformat()
-                else:
-                    call[field] = str(call[field])
+#     except ValueError as e:
+#         return error_response(str(e), 404)
+#     except Exception as e:
+#         logging.error(f"Error toggling agent status: {e}")
+#         traceback.print_exc()
+#         return error_response("Failed to toggle agent status", 500)
+
+
+
+
+# @router.post("/agents/toggle-status")
+# async def toggle_agent_status(
+#     request: ToggleAgentStatusRequest,
+#     current_user: dict = Depends(get_current_user)
+# ):
+#     """
+#     Admin-only: Activate or deactivate an agent globally.
+#     """
+#     try:
+#         #  Admin check (strict)
+#         is_admin = current_user.get("is_admin") or current_user.get("role") == "admin"
+#         if not is_admin:
+#             return error_response("Unauthorized: Only admins can toggle agent status", 403)
+
+#         admin_id = current_user["id"]
+#         agent_id = request.agent_id
+#         is_active = request.is_active
+
+#         # Toggle agent status (global)
+#         result = db.toggle_agent_status_admin(
+#             admin_id=admin_id,
+#             agent_id=agent_id,
+#             is_active=is_active
+#         )
+
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "message": f"Agent {'activated' if is_active else 'deactivated'} successfully",
+#                 "data": result
+#             }
+#         )
+
+#     except ValueError as e:
+#         return error_response(str(e), 404)
+#     except Exception as e:
+#         logging.error(f"Error toggling agent status: {e}")
+#         traceback.print_exc()
+#         return error_response("Failed to toggle agent status", 500)
+
+
+# @router.get("/agents/{agent_id}/status")
+# async def get_agent_status(
+#     agent_id: int,
+#     current_user: dict = Depends(get_current_user)
+# ):
+#     """
+#     Get the activation status of a specific agent for the current user.
+#     """
+#     try:
+#         user_id = current_user["id"]
         
-        # 🔥 ADD PRESIGNED URLS
-        call = add_presigned_urls_to_call(call)
+#         # Get the status
+#         status = db.get_agent_status_for_user(user_id, agent_id)
         
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "data": call
-            }
-        )
-    except Exception as e:
-        logging.error(f"Error fetching call details: {e}")
-        traceback.print_exc()  # Add this to see full error
-        return error_response("Failed to fetch call details", 500)
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "data": {
+#                     "agent_id": agent_id,
+#                     **status
+#                 }
+#             }
+#         )
+        
+#     except Exception as e:
+#         logging.error(f"Error getting agent status: {e}")
+#         traceback.print_exc()
+#         return error_response("Failed to get agent status", 500)
+
+# @router.get("/agents/statuses/all")
+# async def get_all_agent_statuses(
+#     current_user: dict = Depends(get_current_user)
+# ):
+#     """
+#     Get activation status of all agents for the current user.
+#     """
+#     try:
+#         user_id = current_user["id"]
+        
+#         # Get all agent statuses
+#         statuses = db.get_all_agent_statuses_for_user(user_id)
+        
+#         return JSONResponse(
+#             status_code=200,
+#             content={
+#                 "success": True,
+#                 "data": statuses
+#             }
+#         )
+        
+#     except Exception as e:
+#         logging.error(f"Error getting all agent statuses: {e}")
+#         traceback.print_exc()
+#         return error_response("Failed to get agent statuses", 500)
+
 
 @router.post("/livekit-webhook")
 async def livekit_webhook(request: Request):
@@ -1201,7 +1569,7 @@ async def livekit_webhook(request: Request):
             
             # Skip if already final
             if current_status in {"completed", "unanswered"}:
-                logging.info(f"ℹ️ Call {call_id} already finalized, skipping webhook processing")
+                logging.info(f" Call {call_id} already finalized, skipping webhook processing")
                 return JSONResponse({"message": "Already finalized"})
 
             answered = check_if_answered(events_log)
@@ -1220,7 +1588,7 @@ async def livekit_webhook(request: Request):
             db.update_call_history(call_id, updates)
             
             logging.info(
-                f"✅ Call {call_id} marked as {final_status}. "
+                f" Call {call_id} marked as {final_status}. "
                 f"Duration will be set by agent."
             )
             
@@ -1263,7 +1631,7 @@ async def get_agents_by_owner(
         # Get agents
         agents = db.get_agents_by_owner_name(user_id, owner_name.strip())
         
-        # 🔥 ADD PRESIGNED URLS
+        # ADD PRESIGNED URLS
         for agent in agents:
             add_presigned_urls_to_agent(agent)
         
@@ -1282,19 +1650,20 @@ async def get_agents_by_owner(
         traceback.print_exc()
         return error_response("Failed to fetch agents by owner", 500)
     
-
-@router.post("/agent/book-appointment")
-async def book_appointment(request: Request):
+@router.get("/agent/get-appointments/{user_id}")
+async def get_appointments(user_id: int, from_date: str = None):
     """
-    API for LiveKit agent to book an appointment.
-    ✅ Sends confirmation emails to BOTH customer AND owner.
+    API for LiveKit agent to get all appointments.
+    Fetches from BOTH Google Calendar (if connected) AND local database.
+    Merges results and returns combined list.
     """
     try:
-        data = await request.json()
+        from services.google_calendar_service import GoogleCalendarService
         
+        all_appointments = []
         user_id = data.get("user_id")  # This is agent_id
         appointment_date = data.get("appointment_date") 
-        start_time = data.get("start_time")
+        start_time = data.get("start_time") 
         end_time = data.get("end_time")
         customer_name = data.get("customer_name", "Valued Customer")
         customer_email = data.get("customer_email")
@@ -1303,67 +1672,523 @@ async def book_appointment(request: Request):
         description = data.get("description", "")
         organizer_name = data.get("organizer_name")
         
-        if not all([user_id, appointment_date, start_time, end_time, customer_email]):
-            return error_response("Missing required fields", status_code=400)
-        
-        # Get agent details to fetch owner_email
-        agent = db.get_agent_by_id(user_id)
-        if not agent:
-            return error_response("Agent not found", status_code=404)
-        
-        owner_email = agent.get("owner_email")
-        owner_name = agent.get("owner_name", "Business Owner")
-        
-        # Send email to CUSTOMER
-        customer_email_sent = await mail_obj.send_email_with_calendar_event(
-            attendee_email=customer_email,
-            attendee_name=customer_name,
-            appointment_date=appointment_date,
-            start_time=start_time,
-            end_time=end_time,
-            title=title,
-            description=description,
-            organizer_name=organizer_name or owner_name,
-            organizer_email=owner_email or customer_email
-        )
-        
-        # 🔥 Send email to OWNER (using dedicated function)
-        owner_email_sent = False
-        if owner_email:
-            owner_email_sent = await mail_obj.send_owner_appointment_notification(
-                owner_email=owner_email,
-                owner_name=owner_name,
-                customer_name=customer_name,
-                customer_email=customer_email,
-                customer_phone=customer_phone,
-                appointment_date=appointment_date,
-                start_time=start_time,
-                end_time=end_time,
-                title=title,
-                description=description
-            )
+        # 1. Try to fetch from Google Calendar
+        try:
+            credentials = db.get_google_credentials(user_id)
             
-            logging.info(
-                f"📧 Appointment emails sent - "
-                f"Customer: {customer_email_sent}, Owner: {owner_email_sent}"
-            )
-        else:
-            logging.warning(f"⚠️ No owner_email for agent {user_id}, skipping owner notification")
+            if credentials:
+                logging.info(f"Fetching Google Calendar appointments for user {user_id}")
+                gcal = GoogleCalendarService(credentials)
+                
+                # Parse date or use today
+                if from_date:
+                    target_date = datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc)
+                else:
+                    target_date = datetime.now(timezone.utc)
+                
+                # Get events for the next 30 days from target date
+                start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                end_date = start_of_day + timedelta(days=30)
+                
+                google_events = gcal.list_events(time_min=start_of_day, time_max=end_date, max_results=100)
+                
+                # Format Google Calendar events
+                for event in google_events:
+                    all_appointments.append({
+                        "id": event["id"],
+                        "date": event["date"],
+                        "start_time": event["start_time"],
+                        "end_time": event["end_time"],
+                        "attendee_name": event.get("location", ""),
+                        "attendee_email": "",
+                        "title": event["summary"],
+                        "description": event.get("description", ""),
+                        "status": "Scheduled",
+                        "source": "google_calendar"
+                    })
+                
+                # Update credentials if refreshed
+                updated_creds = gcal.get_updated_credentials()
+                if updated_creds['access_token'] != credentials['access_token']:
+                    db.save_google_credentials(user_id, **updated_creds)
+                    logging.info(f"?? Refreshed Google credentials for user {user_id}")
+                
+                logging.info(f"? Fetched {len(google_events)} appointments from Google Calendar")
+            else:
+                logging.info(f"User {user_id} does not have Google Calendar connected")
+        
+        except Exception as google_error:
+            logging.error(f"Google Calendar error: {google_error}")
+            traceback.print_exc()
+        
+        # 2. Also fetch from local database
+        try:
+            local_appointments = db.get_user_appointments(user_id, from_date)
+            
+            # Format local appointments to match response structure
+            for apt in local_appointments:
+                # Parse scheduled_time to extract date and time
+                scheduled_time = apt.get("scheduled_time", "")
+                if scheduled_time:
+                    if isinstance(scheduled_time, str):
+                        dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
+                    else:
+                        dt = scheduled_time
+                    
+                    all_appointments.append({
+                        "id": apt["id"],
+                        "date": dt.date().isoformat(),
+                        "start_time": dt.time().strftime('%H:%M'),
+                        "end_time": "",  # Local DB doesn't store end_time separately
+                        "attendee_name": apt.get("customer_name", ""),
+                        "attendee_email": "",
+                        "title": "Appointment",
+                        "description": apt.get("notes", ""),
+                        "status": apt.get("status", "Scheduled"),
+                        "source": "local_database"
+                    })
+            
+            logging.info(f"? Fetched {len(local_appointments)} appointments from local database")
+        
+        except Exception as db_error:
+            logging.error(f"Database error: {db_error}")
+            traceback.print_exc()
+        
+        # 3. Sort all appointments by date and time
+        all_appointments.sort(key=lambda x: (x["date"], x["start_time"]))
         
         return JSONResponse({
             "success": True,
-            "message": "Appointment booked successfully",
-            "emails_sent": {
-                "customer": customer_email_sent,
-                "owner": owner_email_sent
-            }
+            "user_id": user_id,
+            "appointments": all_appointments,
+            "count": len(all_appointments)
         })
         
     except Exception as e:
-        logging.error(f"Error booking appointment: {e}")
+        logging.error(f"Error fetching appointments: {e}")
         traceback.print_exc()
-        return error_response(f"Failed to book appointment: {str(e)}", status_code=500)
-    
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+@router.post("/agent/book-appointment")
+async def book_appointment(request: Request):
+    try:
+        data = await request.json()
+        
+        agent_id = data.get("user_id")
+        appointment_date = data.get("appointment_date")
+        start_time = data.get("start_time")
+        end_time = data.get("end_time")
+        title = data.get("title", "Appointment")
+        description = data.get("description", "")
+        attendee_name = data.get("customer_name", "")
+        organizer_email = data.get("customer_email")
+        organizer_name = data.get("organizer_name", "")
+        notes = data.get("notes", "")
+        phone_number = data.get("customer_phone")
+        
+        logging.info(f"Booking appointment for agent {agent_id}: {appointment_date} {start_time}-{end_time}")
+        
+        if not all([agent_id, appointment_date, start_time, end_time]):
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Missing required fields"}
+            )
+        
+        agent = db.get_agent_by_id(agent_id)
+        if not agent:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "message": "Agent not found"}
+            )
+        
+        user_id = agent.get('user_id') or agent.get('admin_id')
+        if not user_id:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Agent has no associated user"}
+            )
+        
+        logging.info(f"Resolved agent {agent_id} to user {user_id}")
+        
+        # Parse datetime
+        date_obj = datetime.fromisoformat(appointment_date)
+        start_hour, start_min = map(int, start_time.split(':'))
+        end_hour, end_min = map(int, end_time.split(':'))
+        
+        start_datetime = date_obj.replace(hour=start_hour, minute=start_min, tzinfo=timezone.utc)
+        end_datetime = date_obj.replace(hour=end_hour, minute=end_min, tzinfo=timezone.utc)
+        
+        # Build full description with phone number
+        full_description = description
+        if phone_number:
+            full_description += f"\n\nPhone: {phone_number}"
+        if notes:
+            full_description += f"\n\nNotes: {notes}"
+        
+        attendees_list = [organizer_email] if organizer_email else []
+        
+        # Get credentials from both Google and Outlook tables
+        google_creds = db.get_google_credentials(user_id)
+        outlook_creds = db.get_outlook_credentials(user_id)
+        
+        calendar_services = {}
+        calendar_results = {}
+        
+        # Initialize Google Calendar service
+        if google_creds:
+            try:
+                from services.google_calendar_service import GoogleCalendarService
+                calendar_services['google'] = GoogleCalendarService(google_creds)
+                logging.info("Google Calendar service initialized")
+            except Exception as e:
+                logging.error(f"Error initializing Google calendar service: {e}")
+                calendar_results['google'] = {"status": "error", "error": str(e)}
+        
+        # Initialize Outlook Calendar service
+        if outlook_creds:
+            try:
+                from services.outlook_calendar_service import OutlookCalendarService
+                calendar_services['outlook'] = OutlookCalendarService(outlook_creds)
+                logging.info("Outlook Calendar service initialized")
+            except Exception as e:
+                logging.error(f"Error initializing Outlook calendar service: {e}")
+                calendar_results['outlook'] = {"status": "error", "error": str(e)}
+        
+        # Check availability across ALL calendars
+        for provider, service in calendar_services.items():
+            try:
+                is_available = service.check_availability(start_datetime, end_datetime)
+                
+                if not is_available:
+                    logging.warning(f"Time slot conflict in {provider} Calendar for user {user_id}")
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "success": False,
+                            "message": f"Time slot already booked in {provider.capitalize()} Calendar",
+                            "conflict": True,
+                            "provider": provider
+                        }
+                    )
+                logging.info(f"{provider.capitalize()} Calendar: slot available")
+            except Exception as e:
+                logging.error(f"Error checking {provider} availability: {e}")
+                # Continue checking other calendars even if one fails
+        
+        # Create events in ALL calendars
+        for provider, service in calendar_services.items():
+            try:
+                event = service.create_event(
+                    summary=title,
+                    start_datetime=start_datetime,
+                    end_datetime=end_datetime,
+                    description=full_description,
+                    location=attendee_name,
+                    attendees=attendees_list
+                )
+                
+                event_id = event.get("id") if provider == 'google' else event.get("id")
+                calendar_results[provider] = {
+                    "status": "created",
+                    "event_id": event_id
+                }
+                
+                logging.info(f"{provider.capitalize()} Calendar event created: {event_id}")
+                
+                # Update credentials if refreshed
+                updated_creds = service.get_updated_credentials()
+                
+                if provider == 'google':
+                    db.save_google_credentials(
+                        user_id=user_id,
+                        access_token=updated_creds['access_token'],
+                        refresh_token=updated_creds['refresh_token'],
+                        token_expiry=updated_creds['token_expiry'],
+                        scopes=updated_creds.get('scopes')
+                    )
+                elif provider == 'outlook':
+                    db.save_outlook_credentials(
+                        user_id=user_id,
+                        access_token=updated_creds['access_token'],
+                        refresh_token=updated_creds['refresh_token'],
+                        token_expiry=updated_creds['token_expiry'],
+                        scopes=updated_creds.get('scopes')
+                    )
+                
+            except Exception as calendar_error:
+                logging.error(f"{provider.capitalize()} Calendar event creation failed: {calendar_error}")
+                traceback.print_exc()
+                calendar_results[provider] = {
+                    "status": "failed",
+                    "error": str(calendar_error)
+                }
+        
+        # Save to database regardless of calendar status
+        try:
+            scheduled_datetime = f"{appointment_date} {start_time}"
+            
+            appointment_result = db.create_appointment({
+                'user_id': user_id,
+                'call_id': None,
+                'customer_name': attendee_name,
+                'scheduled_time': scheduled_datetime,
+                'notes': f"{title}\n{description}" + (f"\n\nNotes: {notes}" if notes else ""),
+                'status': 'Scheduled'
+            })
+            
+            appointment_id = appointment_result['id'] if isinstance(appointment_result, dict) else appointment_result
+            
+            logging.info(f"Appointment saved to database: ID {appointment_id}")
+            
+            # Build response
+            response = {
+                "success": True,
+                "message": "Appointment booked successfully",
+                "appointment_id": int(appointment_id),
+                "start_datetime": start_datetime.isoformat(),
+                "end_datetime": end_datetime.isoformat(),
+                "calendar_events": calendar_results
+            }
+            
+            # Add calendar status summary
+            successful_calendars = [p for p, r in calendar_results.items() if r.get("status") == "created"]
+            if successful_calendars:
+                response["calendars_synced"] = successful_calendars
+            
+            if len(calendar_results) == 0:
+                response["note"] = "Saved locally (no calendars connected)"
+            
+            return JSONResponse(content=response)
+            
+        except Exception as db_error:
+            logging.error(f"Database error: {db_error}")
+            traceback.print_exc()
+            
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "message": f"Failed to save appointment: {str(db_error)}"}
+            )
+        
+    except Exception as e:
+        logging.error(f"Error in book_appointment: {e}")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Failed to book appointment: {str(e)}"}
+        )
+
+@router.get("/agent/get-appointments/{user_id}")
+async def get_appointments(user_id: int, from_date: str = None):
+    """
+    API for LiveKit agent to get all appointments.
+    Fetches from BOTH Google Calendar AND Outlook Calendar (if connected) AND local database.
+    Merges results and returns combined list.
+    """
+    try:
+        all_appointments = []
+        
+        # 1. Try to fetch from Google Calendar
+        try:
+            google_creds = db.get_google_credentials(user_id)
+            
+            if google_creds:
+                logging.info(f"Fetching Google Calendar appointments for user {user_id}")
+                from services.google_calendar_service import GoogleCalendarService
+                gcal = GoogleCalendarService(google_creds)
+                
+                # Parse date or use today
+                if from_date:
+                    target_date = datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc)
+                else:
+                    target_date = datetime.now(timezone.utc)
+                
+                # Get events for the next 30 days from target date
+                start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                end_date = start_of_day + timedelta(days=30)
+                
+                google_events = gcal.list_events(time_min=start_of_day, time_max=end_date, max_results=100)
+                
+                # Format Google Calendar events
+                for event in google_events:
+                    start = event.get("start", {})
+                    end = event.get("end", {})
+                    
+                    start_dt = start.get("dateTime", start.get("date", ""))
+                    end_dt = end.get("dateTime", end.get("date", ""))
+                    
+                    if start_dt:
+                        start_parsed = datetime.fromisoformat(start_dt.replace('Z', '+00:00'))
+                        event_date = start_parsed.date().isoformat()
+                        event_start_time = start_parsed.time().strftime('%H:%M')
+                    else:
+                        event_date = ""
+                        event_start_time = ""
+                    
+                    if end_dt:
+                        end_parsed = datetime.fromisoformat(end_dt.replace('Z', '+00:00'))
+                        event_end_time = end_parsed.time().strftime('%H:%M')
+                    else:
+                        event_end_time = ""
+                    
+                    all_appointments.append({
+                        "id": event.get("id", ""),
+                        "date": event_date,
+                        "start_time": event_start_time,
+                        "end_time": event_end_time,
+                        "attendee_name": event.get("location", ""),
+                        "attendee_email": "",
+                        "title": event.get("summary", ""),
+                        "description": event.get("description", ""),
+                        "status": "Scheduled",
+                        "source": "google_calendar"
+                    })
+                
+                # Update credentials if refreshed
+                updated_creds = gcal.get_updated_credentials()
+                if updated_creds['access_token'] != google_creds['access_token']:
+                    db.save_google_credentials(
+                        user_id=user_id,
+                        access_token=updated_creds['access_token'],
+                        refresh_token=updated_creds['refresh_token'],
+                        token_expiry=updated_creds['token_expiry'],
+                        scopes=updated_creds.get('scopes')
+                    )
+                
+                logging.info(f"Fetched {len(google_events)} appointments from Google Calendar")
+            else:
+                logging.info(f"User {user_id} does not have Google Calendar connected")
+        
+        except Exception as google_error:
+            logging.error(f"Google Calendar error: {google_error}")
+            traceback.print_exc()
+        
+        # 2. Try to fetch from Outlook Calendar
+        try:
+            outlook_creds = db.get_outlook_credentials(user_id)
+            
+            if outlook_creds:
+                logging.info(f"Fetching Outlook Calendar appointments for user {user_id}")
+                from services.outlook_calendar_service import OutlookCalendarService
+                ocal = OutlookCalendarService(outlook_creds)
+                
+                # Parse date or use today
+                if from_date:
+                    target_date = datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc)
+                else:
+                    target_date = datetime.now(timezone.utc)
+                
+                # Get events for the next 30 days from target date
+                start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                end_date = start_of_day + timedelta(days=30)
+                
+                outlook_events = ocal.list_events(time_min=start_of_day, time_max=end_date, max_results=100)
+                
+                # Format Outlook Calendar events
+                for event in outlook_events:
+                    start = event.get("start", {})
+                    end = event.get("end", {})
+                    
+                    start_dt = start.get("dateTime", "")
+                    end_dt = end.get("dateTime", "")
+                    
+                    if start_dt:
+                        start_parsed = datetime.fromisoformat(start_dt.replace('Z', '+00:00'))
+                        event_date = start_parsed.date().isoformat()
+                        event_start_time = start_parsed.time().strftime('%H:%M')
+                    else:
+                        event_date = ""
+                        event_start_time = ""
+                    
+                    if end_dt:
+                        end_parsed = datetime.fromisoformat(end_dt.replace('Z', '+00:00'))
+                        event_end_time = end_parsed.time().strftime('%H:%M')
+                    else:
+                        event_end_time = ""
+                    
+                    all_appointments.append({
+                        "id": event.get("id", ""),
+                        "date": event_date,
+                        "start_time": event_start_time,
+                        "end_time": event_end_time,
+                        "attendee_name": event.get("location", {}).get("displayName", ""),
+                        "attendee_email": "",
+                        "title": event.get("subject", ""),
+                        "description": event.get("body", {}).get("content", ""),
+                        "status": "Scheduled",
+                        "source": "outlook_calendar"
+                    })
+                
+                # Update credentials if refreshed
+                updated_creds = ocal.get_updated_credentials()
+                if updated_creds['access_token'] != outlook_creds['access_token']:
+                    db.save_outlook_credentials(
+                        user_id=user_id,
+                        access_token=updated_creds['access_token'],
+                        refresh_token=updated_creds['refresh_token'],
+                        token_expiry=updated_creds['token_expiry'],
+                        scopes=updated_creds.get('scopes')
+                    )
+                
+                logging.info(f"Fetched {len(outlook_events)} appointments from Outlook Calendar")
+            else:
+                logging.info(f"User {user_id} does not have Outlook Calendar connected")
+        
+        except Exception as outlook_error:
+            logging.error(f"Outlook Calendar error: {outlook_error}")
+            traceback.print_exc()
+        
+        # 3. Also fetch from local database
+        try:
+            local_appointments = db.get_user_appointments(user_id, from_date)
+            
+            # Format local appointments to match response structure
+            for apt in local_appointments:
+                scheduled_time = apt.get("scheduled_time", "")
+                if scheduled_time:
+                    if isinstance(scheduled_time, str):
+                        dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
+                    else:
+                        dt = scheduled_time
+                    
+                    all_appointments.append({
+                        "id": apt["id"],
+                        "date": dt.date().isoformat(),
+                        "start_time": dt.time().strftime('%H:%M'),
+                        "end_time": "",
+                        "attendee_name": apt.get("customer_name", ""),
+                        "attendee_email": "",
+                        "title": "Appointment",
+                        "description": apt.get("notes", ""),
+                        "status": apt.get("status", "Scheduled"),
+                        "source": "local_database"
+                    })
+            
+            logging.info(f"Fetched {len(local_appointments)} appointments from local database")
+        
+        except Exception as db_error:
+            logging.error(f"Database error: {db_error}")
+            traceback.print_exc()
+        
+        # 4. Sort all appointments by date and time
+        all_appointments.sort(key=lambda x: (x["date"], x["start_time"]))
+        
+        return JSONResponse({
+            "success": True,
+            "user_id": user_id,
+            "appointments": all_appointments,
+            "count": len(all_appointments)
+        })
+        
+    except Exception as e:
+        logging.error(f"Error fetching appointments: {e}")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
 
 @router.post("/forgot-password")
 async def forgot_password(request: ForgotPasswordRequest):
@@ -1460,7 +2285,7 @@ async def reset_password(request: ResetPasswordRequest):
 #     logger = logging.getLogger(__name__)
     
 #     try:
-#         logger.info("📥 Starting voice migration from JSON...")
+#         logger.info(" Starting voice migration from JSON...")
         
 #         # Read and parse JSON
 #         content = await voices_json.read()
@@ -1469,7 +2294,7 @@ async def reset_password(request: ResetPasswordRequest):
 #         if not isinstance(voices_data, list):
 #             return error_response("Invalid JSON format. Expected array of voice objects.", 400)
         
-#         logger.info(f"📋 Found {len(voices_data)} voice records in JSON")
+#         logger.info(f" Found {len(voices_data)} voice records in JSON")
         
 #         # Validate required fields
 #         required_fields = ['voice_name', 'voice_id', 'language', 'country_code', 'gender', 'audio_blob_path']
@@ -1483,7 +2308,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 # Validate fields
 #                 missing_fields = [field for field in required_fields if field not in voice]
 #                 if missing_fields:
-#                     logger.warning(f"⚠️ Record {idx}: Missing fields {missing_fields}, skipping")
+#                     logger.warning(f" Record {idx}: Missing fields {missing_fields}, skipping")
 #                     failed.append(f"{voice.get('voice_name', 'Unknown')}: Missing {missing_fields}")
 #                     continue
                 
@@ -1499,18 +2324,18 @@ async def reset_password(request: ResetPasswordRequest):
 #                 })
                 
 #                 inserted_count += 1
-#                 logger.info(f"✅ [{idx}/{len(voices_data)}] Inserted: {voice['voice_name']} ({voice['voice_id']})")
+#                 logger.info(f" [{idx}/{len(voices_data)}] Inserted: {voice['voice_name']} ({voice['voice_id']})")
                 
 #             except Exception as e:
 #                 error_msg = str(e)
 #                 if 'duplicate key' in error_msg.lower() or 'unique constraint' in error_msg.lower():
 #                     skipped_count += 1
-#                     logger.info(f"⏭️ [{idx}/{len(voices_data)}] Skipped (duplicate): {voice.get('voice_name')}")
+#                     logger.info(f" [{idx}/{len(voices_data)}] Skipped (duplicate): {voice.get('voice_name')}")
 #                 else:
-#                     logger.error(f"❌ [{idx}/{len(voices_data)}] Failed: {voice.get('voice_name')} - {e}")
+#                     logger.error(f" [{idx}/{len(voices_data)}] Failed: {voice.get('voice_name')} - {e}")
 #                     failed.append(f"{voice.get('voice_name', 'Unknown')}: {error_msg}")
         
-#         logger.info(f"✅ Migration complete!")
+#         logger.info(f" Migration complete!")
 #         logger.info(f"   Inserted: {inserted_count}")
 #         logger.info(f"   Skipped (duplicates): {skipped_count}")
 #         logger.info(f"   Failed: {len(failed)}")
@@ -1528,10 +2353,10 @@ async def reset_password(request: ResetPasswordRequest):
 #         })
         
 #     except json.JSONDecodeError as e:
-#         logger.error(f"❌ Invalid JSON: {e}")
+#         logger.error(f" Invalid JSON: {e}")
 #         return error_response(f"Invalid JSON file: {str(e)}", 400)
 #     except Exception as e:
-#         logger.error(f"❌ Migration error: {e}")
+#         logger.error(f" Migration error: {e}")
 #         traceback.print_exc()
 #         return error_response(f"Migration failed: {str(e)}", 500)
 
@@ -1553,7 +2378,7 @@ async def reset_password(request: ResetPasswordRequest):
     
 #     try:
 #         # ==================== STEP 1: PARSE DOCUMENT ====================
-#         logger.info("📋 Step 1: Parsing voice document...")
+#         logger.info(" Step 1: Parsing voice document...")
 #         doc_content = (await voice_doc.read()).decode('utf-8')
         
 #         # Language mapping
@@ -1582,15 +2407,15 @@ async def reset_password(request: ResetPasswordRequest):
 #             for lang_name, lang_code in language_patterns.items():
 #                 if lang_name.lower() in line.lower() and ('voice' in line.lower() or 'agent' in line.lower()):
 #                     current_language = lang_code
-#                     logger.info(f"🌐 Found language section: {lang_name.upper()} ({lang_code})")
+#                     logger.info(f" Found language section: {lang_name.upper()} ({lang_code})")
 #                     break
             
-#             # 🔥 FIX: Match ANY "Name:" pattern (not just "First Name:", "Second Name:", etc.)
+#             # FIX: Match ANY "Name:" pattern (not just "First Name:", "Second Name:", etc.)
 #             if re.match(r'^(First\s+|Second\s+|Third\s+|Fourth\s+)?Name:\s*.+', line, re.IGNORECASE):
 #                 # Save previous voice if complete
 #                 if current_voice and all(k in current_voice for k in ['voice_name', 'gender', 'voice_id', 'audio_filename']):
 #                     voices.append(current_voice)
-#                     logger.info(f"  ✓ Added: {current_voice['voice_name']}")
+#                     logger.info(f"   Added: {current_voice['voice_name']}")
                 
 #                 # Start new voice
 #                 name = re.sub(r'^(First\s+|Second\s+|Third\s+|Fourth\s+)?Name:\s*', '', line, flags=re.IGNORECASE).strip()
@@ -1617,26 +2442,26 @@ async def reset_password(request: ResetPasswordRequest):
 #         # Add last voice
 #         if current_voice and all(k in current_voice for k in ['voice_name', 'gender', 'voice_id', 'audio_filename']):
 #             voices.append(current_voice)
-#             logger.info(f"  ✓ Added: {current_voice['voice_name']}")
+#             logger.info(f"   Added: {current_voice['voice_name']}")
         
-#         logger.info(f"✅ Parsed {len(voices)} voices from document")
+#         logger.info(f" Parsed {len(voices)} voices from document")
         
 #         if not voices:
 #             return error_response("No voices found in document", 400)
         
 #         # Log parsed voices for debugging
 #         for v in voices:
-#             logger.info(f"  📝 {v['voice_name']} ({v['language']}) - {v['voice_id']}")
+#             logger.info(f"   {v['voice_name']} ({v['language']}) - {v['voice_id']}")
 #             logger.info(f"     Audio: {v['audio_filename']}")
         
 #         # ==================== STEP 2: SAVE AUDIO FILES TEMPORARILY ====================
-#         logger.info("💾 Step 2: Saving audio files to temp directory...")
+#         logger.info(" Step 2: Saving audio files to temp directory...")
 #         temp_dir = Path(tempfile.mkdtemp())
         
 #         audio_file_map = {}
 #         for audio_file in audio_files:
 #             if not audio_file.filename.endswith('.mp3'):
-#                 logger.warning(f"  ⚠️ Skipping non-MP3 file: {audio_file.filename}")
+#                 logger.warning(f"  Skipping non-MP3 file: {audio_file.filename}")
 #                 continue
             
 #             file_path = temp_dir / audio_file.filename
@@ -1651,12 +2476,12 @@ async def reset_password(request: ResetPasswordRequest):
 #             normalized_name = audio_file.filename.lower().replace(' ', '').replace('_', '').replace('-', '')
 #             audio_file_map[normalized_name] = file_path
             
-#             logger.info(f"  ✓ Saved: {audio_file.filename}")
+#             logger.info(f"   Saved: {audio_file.filename}")
         
-#         logger.info(f"✅ Saved {len(audio_files)} audio files")
+#         logger.info(f" Saved {len(audio_files)} audio files")
         
 #         # ==================== STEP 3: MATCH VOICES WITH AUDIO FILES ====================
-#         logger.info("🔗 Step 3: Matching voices with audio files...")
+#         logger.info(" Step 3: Matching voices with audio files...")
 #         matched_voices = []
         
 #         for voice in voices:
@@ -1667,7 +2492,7 @@ async def reset_password(request: ResetPasswordRequest):
 #             if expected_filename in audio_file_map:
 #                 voice['audio_path'] = audio_file_map[expected_filename]
 #                 matched_voices.append(voice)
-#                 logger.info(f"✅ Exact match: {voice['voice_name']} → {expected_filename}")
+#                 logger.info(f" Exact match: {voice['voice_name']}  {expected_filename}")
 #                 matched = True
 #                 continue
             
@@ -1676,7 +2501,7 @@ async def reset_password(request: ResetPasswordRequest):
 #             if exact_path.exists():
 #                 voice['audio_path'] = exact_path
 #                 matched_voices.append(voice)
-#                 logger.info(f"✅ File system match: {voice['voice_name']} → {expected_filename}")
+#                 logger.info(f" File system match: {voice['voice_name']}  {expected_filename}")
 #                 matched = True
 #                 continue
             
@@ -1687,7 +2512,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 voice['audio_path'] = audio_file_map[normalized_expected]
 #                 matched_voices.append(voice)
 #                 actual_name = audio_file_map[normalized_expected].name
-#                 logger.info(f"✅ Fuzzy match: {voice['voice_name']} → {actual_name}")
+#                 logger.info(f" Fuzzy match: {voice['voice_name']}  {actual_name}")
 #                 matched = True
 #                 continue
             
@@ -1698,21 +2523,21 @@ async def reset_password(request: ResetPasswordRequest):
 #                     if voice_id in filename.lower():
 #                         voice['audio_path'] = filepath
 #                         matched_voices.append(voice)
-#                         logger.info(f"✅ ID match: {voice['voice_name']} → {filepath.name}")
+#                         logger.info(f" ID match: {voice['voice_name']}  {filepath.name}")
 #                         matched = True
 #                         break
             
 #             if not matched:
-#                 logger.warning(f"⚠️ No audio file found for: {voice['voice_name']} (expected: {expected_filename})")
+#                 logger.warning(f" No audio file found for: {voice['voice_name']} (expected: {expected_filename})")
         
-#         logger.info(f"✅ Matched {len(matched_voices)}/{len(voices)} voices")
+#         logger.info(f" Matched {len(matched_voices)}/{len(voices)} voices")
         
 #         if not matched_voices:
 #             shutil.rmtree(temp_dir)
 #             return error_response("No audio files matched with document data", 400)
         
 #         # ==================== STEP 4: UPLOAD TO HETZNER ====================
-#         logger.info("☁️ Step 4: Uploading to Hetzner...")
+#         logger.info(" Step 4: Uploading to Hetzner...")
 #         s3_client = get_s3_client()
 #         bucket_name = HETZNER_BUCKET_NAME
         
@@ -1732,7 +2557,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 blob_path = f"voice_samples/{voice_id}.mp3"
                 
 #                 # Upload to Hetzner
-#                 logger.info(f"  📤 Uploading {voice['voice_name']} ({len(audio_content)} bytes)...")
+#                 logger.info(f"   Uploading {voice['voice_name']} ({len(audio_content)} bytes)...")
 #                 s3_client.put_object(
 #                     Bucket=bucket_name,
 #                     Key=blob_path,
@@ -1744,17 +2569,17 @@ async def reset_password(request: ResetPasswordRequest):
 #                 voice['audio_blob_path'] = blob_path
 #                 uploaded_voices.append(voice)
                 
-#                 logger.info(f"✅ Uploaded: {voice['voice_name']} → {blob_path}")
+#                 logger.info(f" Uploaded: {voice['voice_name']}  {blob_path}")
                 
 #             except Exception as e:
 #                 error_msg = f"Upload failed for {voice['voice_name']}: {str(e)}"
-#                 logger.error(f"❌ {error_msg}")
+#                 logger.error(f" {error_msg}")
 #                 upload_errors.append(error_msg)
 #                 import traceback
 #                 traceback.print_exc()
 #                 continue
         
-#         logger.info(f"✅ Uploaded {len(uploaded_voices)} files to Hetzner")
+#         logger.info(f" Uploaded {len(uploaded_voices)} files to Hetzner")
         
 #         if upload_errors:
 #             logger.error("Upload errors:")
@@ -1762,7 +2587,7 @@ async def reset_password(request: ResetPasswordRequest):
 #                 logger.error(f"  - {err}")
         
 #         # ==================== STEP 5: SAVE TO DATABASE ====================
-#         logger.info("💾 Step 5: Saving to database...")
+#         logger.info(" Step 5: Saving to database...")
 #         saved_count = 0
 #         failed = []
         
@@ -1778,21 +2603,21 @@ async def reset_password(request: ResetPasswordRequest):
 #                     'duration_seconds': None
 #                 })
 #                 saved_count += 1
-#                 logger.info(f"✅ Saved to DB: {voice['voice_name']}")
+#                 logger.info(f" Saved to DB: {voice['voice_name']}")
 #             except Exception as e:
-#                 logger.error(f"❌ DB save failed for {voice['voice_name']}: {e}")
+#                 logger.error(f" DB save failed for {voice['voice_name']}: {e}")
 #                 failed.append(voice['voice_name'])
 #                 import traceback
 #                 traceback.print_exc()
         
 #         # ==================== CLEANUP ====================
 #         shutil.rmtree(temp_dir)
-#         logger.info("🧹 Cleaned up temp files")
+#         logger.info(" Cleaned up temp files")
         
 #         # ==================== RESPONSE ====================
 #         return JSONResponse({
 #             "success": True,
-#             "message": f"✅ Successfully uploaded {saved_count} voice samples!",
+#             "message": f" Successfully uploaded {saved_count} voice samples!",
 #             "summary": {
 #                 "parsed_from_document": len(voices),
 #                 "matched_with_audio": len(matched_voices),
@@ -1815,56 +2640,11 @@ async def reset_password(request: ResetPasswordRequest):
 #         })
         
 #     except Exception as e:
-#         logger.error(f"❌ Bulk upload error: {e}")
+#         logger.error(f" Bulk upload error: {e}")
 #         import traceback
 #         traceback.print_exc()
 #         return error_response(f"Upload failed: {str(e)}", 500)
 
-@router.get("/voice-samples")
-async def get_voice_samples(language: Optional[str] = Query(None)):
-    """
-    PUBLIC endpoint - Get all voice samples with presigned URLs
-    No authentication required
-    """
-    try:
-        # Get samples from database
-        if language:
-            samples = db.get_voice_samples_by_language(language)
-        else:
-            samples = db.get_all_voice_samples()
-        
-        # Add presigned URLs (valid for 24 hours)
-        for sample in samples:
-            if sample.get("audio_blob_path"):
-                sample["audio_url"] = generate_presigned_url(
-                    sample["audio_blob_path"],
-                    expiration=86400  # 24 hours
-                )
-            
-            # Format timestamp
-            if sample.get("created_at"):
-                sample["created_at"] = sample["created_at"].isoformat()
-        
-        # Group by language for easier frontend consumption
-        grouped = {}
-        for sample in samples:
-            lang = sample["language"]
-            if lang not in grouped:
-                grouped[lang] = []
-            grouped[lang].append(sample)
-        
-        return JSONResponse({
-            "success": True,
-            "total": len(samples),
-            "grouped_by_language": grouped,
-            "all_samples": samples
-        })
-        
-    except Exception as e:
-        logging.error(f"Error fetching voice samples: {e}")
-        traceback.print_exc()
-        return error_response("Failed to fetch voice samples", 500)
-    
 
 @router.post("/agents/{agent_id}/reset-minutes")
 async def reset_agent_minutes(
@@ -1890,7 +2670,7 @@ async def reset_agent_minutes(
         db.reset_agent_minutes(agent_id, user_id)
         
         logging.info(
-            f"✅ Agent {agent_id} minutes reset by admin {user_id}. "
+            f" Agent {agent_id} minutes reset by admin {user_id}. "
             f"Was: {old_used}/{allowed} min, Now: 0/{allowed} min"
         )
         
@@ -1944,7 +2724,7 @@ async def submit_contact_form(request: ContactFormRequest):
             logging.error(f"Failed to send contact form email from {request.email}")
             return error_response("Failed to send message. Please try again.", 500)
         
-        logging.info(f"✅ Contact form submitted by {request.first_name} {request.last_name} ({request.email})")
+        logging.info(f" Contact form submitted by {request.first_name} {request.last_name} ({request.email})")
         
         return JSONResponse({
             "success": True,
@@ -1955,3 +2735,755 @@ async def submit_contact_form(request: ContactFormRequest):
         logging.error(f"Error processing contact form: {e}")
         traceback.print_exc()
         return error_response("Failed to submit contact form", 500)
+
+
+# ==================== GOOGLE CALENDAR INTEGRATION ====================
+
+@router.get("/google/auth/status")
+async def google_auth_status(current_user: dict = Depends(get_current_user)):
+    """
+    Check if the current user has connected their Google Calendar.
+    Returns connection status and email if connected.
+    """
+    try:
+        user_id = current_user["id"]
+        
+        credentials = db.get_google_credentials(user_id)
+        
+        if credentials:
+            # Try to get user's email from Google (optional enhancement)
+            return JSONResponse({
+                "connected": True,
+                "email": current_user.get("email")  # Using user's registered email
+            })
+        else:
+            return JSONResponse({
+                "connected": False,
+                "email": None
+            })
+            
+    except Exception as e:
+        logging.error(f"Error checking Google auth status: {e}")
+        traceback.print_exc()
+        return error_response("Failed to check Google Calendar status", 500)
+
+
+@router.get("/google/auth/login")
+async def google_auth_login(current_user: dict = Depends(get_current_user)):
+    """
+    Initiate Google OAuth flow.
+    Returns authorization URL for frontend to redirect user to Google consent screen.
+    """
+    try:
+        import sys
+        import os
+        from google_auth_oauthlib.flow import Flow
+        
+        user_id = current_user["id"]
+        
+        # Get environment variables
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
+        
+        if not all([client_id, client_secret, redirect_uri]):
+            logging.error("Missing Google OAuth environment variables")
+            return error_response("Google Calendar integration not configured", 500)
+        
+        # Create OAuth flow
+        flow = Flow.from_client_config(
+            client_config={
+                "web": {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [redirect_uri]
+                }
+            },
+            scopes=['https://www.googleapis.com/auth/calendar']
+        )
+        
+        flow.redirect_uri = redirect_uri
+        
+        # Generate authorization URL with user_id in state
+        authorization_url, state = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true',
+            state=str(user_id),  # Pass user_id in state for callback
+            prompt='consent'  # Force consent screen to get refresh token
+        )
+        
+        logging.info(f" Generated OAuth URL for user {user_id}")
+        logging.error("===== GOOGLE OAUTH RUNTIME CHECK =====")
+        logging.error(f"CLIENT_ID = {client_id}")
+        logging.error(f"REDIRECT_URI = '{redirect_uri}'")
+        logging.error("=====================================")
+        
+        return JSONResponse({
+            "authorization_url": authorization_url
+        })
+        
+    except Exception as e:
+        logging.error(f"Error generating Google OAuth URL: {e}")
+        traceback.print_exc()
+        return error_response("Failed to initiate Google Calendar connection", 500)
+
+
+@router.get("/google/callback")
+async def google_callback(request: Request):
+    """
+    Handle OAuth callback from Google.
+    Exchanges authorization code for tokens and saves to database.
+    Redirects user to frontend dashboard.
+    """
+    try:
+        from google_auth_oauthlib.flow import Flow
+        
+        # Get query parameters
+        code = request.query_params.get("code")
+        state = request.query_params.get("state")  # This contains user_id
+        error = request.query_params.get("error")
+        
+        frontend_url = os.getenv("FRONTEND_URL", "https://mrbot-ki.de")
+        
+        if error:
+            logging.error(f"OAuth error: {error}")
+            # Redirect to dashboard with error
+            return RedirectResponse(f"{frontend_url}/dashboard?calendar_error={error}")
+        
+        if not code or not state:
+            return RedirectResponse(f"{frontend_url}/dashboard?calendar_error=missing_params")
+        
+        user_id = int(state)
+        
+        # Get environment variables
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
+        
+        # Create OAuth flow
+        flow = Flow.from_client_config(
+            client_config={
+                "web": {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [redirect_uri]
+                }
+            },
+            scopes=['https://www.googleapis.com/auth/calendar']
+        )
+        
+        flow.redirect_uri = redirect_uri
+        
+        # Exchange code for tokens
+        flow.fetch_token(code=code)
+        credentials = flow.credentials
+        
+        # Save credentials to database
+        db.save_google_credentials(
+            user_id=user_id,
+            access_token=credentials.token,
+            refresh_token=credentials.refresh_token,
+            token_expiry=credentials.expiry,
+            scopes=credentials.scopes
+        )
+        
+        logging.info(f"? Saved Google credentials for user {user_id}")
+        
+        # Redirect to dashboard with success message
+        return RedirectResponse(f"{frontend_url}/dashboard?calendar_success=true")
+        
+    except Exception as e:
+        logging.error(f"Error in Google OAuth callback: {e}")
+        traceback.print_exc()
+        frontend_url = os.getenv("FRONTEND_URL", "https://mrbot-ki.de")
+        return RedirectResponse(f"{frontend_url}/dashboard?calendar_error=callback_failed")
+
+
+@router.post("/google/disconnect")
+async def google_disconnect(current_user: dict = Depends(get_current_user)):
+    """
+    Disconnect Google Calendar by deleting stored credentials.
+    """
+    try:
+        user_id = current_user["id"]
+        
+        deleted = db.delete_google_credentials(user_id)
+        
+        if deleted:
+            return JSONResponse({
+                "success": True,
+                "message": "Google Calendar disconnected successfully"
+            })
+        else:
+            return JSONResponse({
+                "success": False,
+                "message": "No Google Calendar connection found"
+            })
+            
+    except Exception as e:
+        logging.error(f"Error disconnecting Google Calendar: {e}")
+        traceback.print_exc()
+        return error_response("Failed to disconnect Google Calendar", 500)
+
+
+@router.get("/google/events")
+async def google_events(
+    time_min: str = Query(None),
+    time_max: str = Query(None),
+    max_results: int = Query(100, le=250),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Fetch calendar events from user's Google Calendar.
+    Automatically refreshes tokens if needed.
+    """
+    try:
+        import sys
+        import os
+        # Add parent directory to path to import from services folder
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        from services.google_calendar_service import GoogleCalendarService
+        
+        user_id = current_user["id"]
+        
+        # Get credentials
+        credentials = db.get_google_credentials(user_id)
+        
+        if not credentials:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": "Google Calendar not connected",
+                    "message": "Please connect your Google Calendar first"
+                }
+            )
+        
+        # Initialize service
+        gcal = GoogleCalendarService(credentials)
+        
+        # Parse time parameters
+        if time_min:
+            time_min_dt = datetime.fromisoformat(time_min.replace('Z', '+00:00'))
+        else:
+            time_min_dt = datetime.now(timezone.utc)
+        
+        if time_max:
+            time_max_dt = datetime.fromisoformat(time_max.replace('Z', '+00:00'))
+        else:
+            time_max_dt = None
+        
+        # Fetch events
+        events = gcal.list_events(time_min_dt, time_max_dt, max_results)
+        
+        # Check if credentials were refreshed
+        updated_creds = gcal.get_updated_credentials()
+        if updated_creds['access_token'] != credentials['access_token']:
+            db.save_google_credentials(user_id, **updated_creds)
+            logging.info(f" Refreshed Google credentials for user {user_id}")
+        
+        return JSONResponse({
+            "events": events
+        })
+        
+    except Exception as e:
+        logging.error(f"Error fetching Google Calendar events: {e}")
+        traceback.print_exc()
+        return error_response("Failed to fetch calendar events", 500)
+
+
+# ==================== AGENT-FACING GOOGLE CALENDAR ENDPOINTS ====================
+
+@router.get("/agent/get-google-credentials/{user_id}")
+async def agent_get_google_credentials(user_id: int):
+    """
+    Check if a user has Google Calendar connected (for AI agent).
+    Returns connection status only, not actual credentials.
+    """
+    try:
+        credentials = db.get_google_credentials(user_id)
+        
+        return JSONResponse({
+            "user_id": user_id,
+            "connected": credentials is not None
+        })
+        
+    except Exception as e:
+        logging.error(f"Error checking Google credentials for agent: {e}")
+        traceback.print_exc()
+        return error_response("Failed to check Google Calendar status", 500)
+
+
+@router.get("/agent/get-google-appointments/{user_id}")
+async def get_google_appointments_for_agent(
+    user_id: int,
+    date: str = Query(None)
+):
+    """
+    API for agent to get appointments from Google Calendar
+    """
+    try:
+        from services.google_calendar_service import GoogleCalendarService
+        
+        # Get credentials
+        credentials = db.get_google_credentials(user_id)
+        
+        if not credentials:
+            return JSONResponse({
+                "success": False,
+                "appointments": [],
+                "message": "Google Calendar not connected"
+            })
+        
+        # Initialize service
+        gcal = GoogleCalendarService(credentials)
+        
+        # Parse date or use today
+        if date:
+            target_date = datetime.fromisoformat(date).replace(tzinfo=timezone.utc)
+        else:
+            target_date = datetime.now(timezone.utc)
+        
+        # Get events for the specific date
+        start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_day = target_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+        
+        events = gcal.list_events(time_min=start_of_day, time_max=end_of_day)
+        
+        # Format for agent
+        appointments = [
+            {
+                "id": event["id"],
+                "date": event["date"],
+                "start_time": event["start_time"],
+                "end_time": event["end_time"],
+                "title": event["summary"],
+                "description": event.get("description", ""),
+                "location": event.get("location", "")
+            }
+            for event in events
+        ]
+        
+        updated_creds = gcal.get_updated_credentials()
+        if updated_creds['access_token'] != credentials['access_token']:
+            db.save_google_credentials(user_id, **updated_creds)
+        
+        return JSONResponse({
+            "success": True,
+            "appointments": appointments,
+            "count": len(appointments)
+        })
+        
+    except Exception as e:
+        logging.error(f"Error getting Google appointments: {e}")
+        traceback.print_exc()
+        return JSONResponse({
+            "success": False,
+            "appointments": [],
+            "error": str(e)
+        })
+
+
+@router.post("/agent/book-google-appointment")
+async def book_google_appointment_for_agent(request: Request):
+    """
+    API for agent to book appointment in Google Calendar
+    """
+    try:
+        from services.google_calendar_service import GoogleCalendarService
+        
+        data = await request.json()
+        
+        user_id = data.get("user_id")
+        appointment_date = data.get("appointment_date")
+        start_time = data.get("start_time")
+        end_time = data.get("end_time")
+        title = data.get("title", "Appointment")
+        description = data.get("description", "")
+        location = data.get("location", "")
+        attendee_name = data.get("attendee_name", "")
+        organizer_email = data.get("organizer_email")
+        
+        # Validate required fields
+        if not all([user_id, appointment_date, start_time, end_time]):
+            return error_response("Missing required fields", status_code=400)
+        
+        # Get user's Google credentials
+        credentials = db.get_google_credentials(user_id)
+        
+        if not credentials:
+            return error_response(
+                "Google Calendar not connected. Please connect first.",
+                status_code=401
+            )
+        
+        gcal = GoogleCalendarService(credentials)
+        
+        date_obj = datetime.fromisoformat(appointment_date)
+        start_hour, start_min = map(int, start_time.split(':'))
+        end_hour, end_min = map(int, end_time.split(':'))
+        
+        start_datetime = date_obj.replace(hour=start_hour, minute=start_min, tzinfo=timezone.utc)
+        end_datetime = date_obj.replace(hour=end_hour, minute=end_min, tzinfo=timezone.utc)
+        
+        is_available = gcal.check_availability(start_datetime, end_datetime)
+        
+        if not is_available:
+            logging.warning(f"?? Time slot conflict for user {user_id} on {appointment_date} {start_time}-{end_time}")
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "message": "Time slot already booked in Google Calendar",
+                    "conflict": True
+                }
+            )
+        
+        # Create event in Google Calendar
+        attendees = [organizer_email] if organizer_email else []
+        
+        event = gcal.create_event(
+            summary=title,
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+            description=description,
+            location=location,
+            attendees=attendees
+        )
+        
+        # Also save to local database as backup
+        # Combine date and time into scheduled_time
+        scheduled_datetime = f"{appointment_date} {start_time}"
+        
+        db.create_appointment({
+            'user_id': user_id,
+            'call_id': None,
+            'customer_name': attendee_name,
+            'scheduled_time': scheduled_datetime,
+            'notes': f"{title}\n{description}" if description else title,
+            'status': 'Scheduled'
+        })
+        
+        # Update credentials if refreshed
+        updated_creds = gcal.get_updated_credentials()
+        if updated_creds['access_token'] != credentials['access_token']:
+            db.save_google_credentials(user_id, **updated_creds)
+            logging.info(f"?? Refreshed Google credentials for user {user_id}")
+        
+        logging.info(f"? Booked appointment for user {user_id}: {title} on {appointment_date} {start_time}-{end_time}")
+        
+        return JSONResponse({
+            "success": True,
+            "google_event_id": event["id"],
+            "message": "Appointment booked successfully in Google Calendar"
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error booking Google appointment: {e}")
+        traceback.print_exc()
+        return error_response(
+            f"Failed to book appointment: {str(e)}",
+            status_code=500
+        )
+        
+@router.get("/voice-samples")
+async def get_voice_samples(language: Optional[str] = Query(None)):
+    """
+    PUBLIC endpoint - Get all voice samples with presigned URLs
+    No authentication required
+    """
+    try:
+        # Get samples from database
+        if language:
+            samples = db.get_voice_samples_by_language(language)
+        else:
+            samples = db.get_all_voice_samples()
+        
+        # Add presigned URLs (valid for 24 hours)
+        for sample in samples:
+            if sample.get("audio_blob_path"):
+                sample["audio_url"] = generate_presigned_url(
+                    sample["audio_blob_path"],
+                    expiration=86400  # 24 hours
+                )
+            
+            # Format timestamp
+            if sample.get("created_at"):
+                sample["created_at"] = sample["created_at"].isoformat()
+        
+        # Group by language for easier frontend consumption
+        grouped = {}
+        for sample in samples:
+            lang = sample["language"]
+            if lang not in grouped:
+                grouped[lang] = []
+            grouped[lang].append(sample)
+        
+        return JSONResponse({
+            "success": True,
+            "total": len(samples),
+            "grouped_by_language": grouped,
+            "all_samples": samples
+        })
+        
+    except Exception as e:
+        logging.error(f"Error fetching voice samples: {e}")
+        traceback.print_exc()
+        return error_response("Failed to fetch voice samples", 500)
+
+
+# ==================== Calendar OAuth Endpoints ====================
+
+@router.get("/calendar/google/auth")
+async def google_calendar_auth(user_id: int = Query(...)):
+    """Initiate Google Calendar OAuth flow"""
+    try:
+        from google_auth_oauthlib.flow import Flow
+        
+        GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+        GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+        GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/api/calendar/google/callback")
+        
+        flow = Flow.from_client_config(
+            {
+                "web": {
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [GOOGLE_REDIRECT_URI]
+                }
+            },
+            scopes=['https://www.googleapis.com/auth/calendar']
+        )
+        flow.redirect_uri = GOOGLE_REDIRECT_URI
+        
+        authorization_url, state = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true',
+            prompt='consent'
+        )
+        
+        # Store state with user_id for validation in callback
+        # In production, use Redis or session storage
+        authorization_url += f"&state={user_id}"
+        
+        return RedirectResponse(authorization_url)
+        
+    except Exception as e:
+        logging.error(f"Error initiating Google OAuth: {e}")
+        return error_response(f"OAuth initialization failed: {str(e)}", 500)
+
+
+@router.get("/calendar/google/callback")
+async def google_calendar_callback(code: str = Query(...), state: str = Query(...)):
+    """Handle Google Calendar OAuth callback"""
+    try:
+        from google_auth_oauthlib.flow import Flow
+        
+        user_id = int(state)  # Extract user_id from state
+        
+        GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+        GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+        GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/api/calendar/google/callback")
+        
+        flow = Flow.from_client_config(
+            {
+                "web": {
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [GOOGLE_REDIRECT_URI]
+                }
+            },
+            scopes=['https://www.googleapis.com/auth/calendar']
+        )
+        flow.redirect_uri = GOOGLE_REDIRECT_URI
+        
+        flow.fetch_token(code=code)
+        
+        credentials = flow.credentials
+        
+        # Save credentials to database
+        db.save_google_credentials(
+            user_id=user_id,
+            access_token=credentials.token,
+            refresh_token=credentials.refresh_token,
+            token_expiry=credentials.expiry,
+            scopes=['https://www.googleapis.com/auth/calendar']
+        )
+        
+        logging.info(f"Google Calendar connected for user {user_id}")
+        
+        return JSONResponse({
+            "success": True,
+            "message": "Google Calendar connected successfully",
+            "provider": "google"
+        })
+        
+    except Exception as e:
+        logging.error(f"Error in Google OAuth callback: {e}")
+        traceback.print_exc()
+        return error_response(f"OAuth callback failed: {str(e)}", 500)
+
+
+
+@router.get("/calendar/outlook/auth")
+async def outlook_calendar_auth(user_id: int = Query(...)):
+    """Initiate Outlook Calendar OAuth flow"""
+    try:
+        import msal
+        
+        MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
+        MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "common")
+        MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:8000/api/calendar/outlook/callback")
+        
+        msal_app = msal.ConfidentialClientApplication(
+            MICROSOFT_CLIENT_ID,
+            authority=f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}",
+            client_credential=os.getenv("MICROSOFT_CLIENT_SECRET")
+        )
+        
+        auth_url = msal_app.get_authorization_request_url(
+            scopes=["Calendars.ReadWrite", "User.Read"],
+            redirect_uri=MICROSOFT_REDIRECT_URI,
+            state=str(user_id)
+        )
+        
+        # Return JSON instead of redirect to avoid CORS issues
+        return JSONResponse(content={
+            "success": True,
+            "auth_url": auth_url
+        })
+        
+    except Exception as e:
+        logging.error(f"Error initiating Outlook OAuth: {e}")
+        return error_response(f"OAuth initialization failed: {str(e)}", 500)
+
+
+
+@router.get("/calendar/outlook/callback")
+async def outlook_calendar_callback(code: str = Query(...), state: str = Query(...)):
+    """Handle Outlook Calendar OAuth callback"""
+    try:
+        import msal
+        
+        user_id = int(state)
+        
+        MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
+        MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET")
+        MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "common")
+        MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:8000/api/calendar/outlook/callback")
+        
+        msal_app = msal.ConfidentialClientApplication(
+            MICROSOFT_CLIENT_ID,
+            authority=f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}",
+            client_credential=MICROSOFT_CLIENT_SECRET
+        )
+        
+        result = msal_app.acquire_token_by_authorization_code(
+            code,
+            scopes=["Calendars.ReadWrite", "User.Read"],
+            redirect_uri=MICROSOFT_REDIRECT_URI
+        )
+        
+        if "access_token" not in result:
+            raise Exception(f"Token acquisition failed: {result.get('error_description')}")
+        
+        # Calculate token expiry
+        expires_in = result.get('expires_in', 3600)
+        token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        
+        # Save credentials
+        db.save_outlook_credentials(
+            user_id=user_id,
+            access_token=result['access_token'],
+            refresh_token=result.get('refresh_token', ''),
+            token_expiry=token_expiry,
+            scopes='Calendars.ReadWrite,offline_access,User.Read'
+        )
+        
+        logging.info(f"Outlook Calendar connected for user {user_id}")
+        
+        # Redirect back to frontend with success
+        frontend_url = os.getenv("FRONTEND_URL", "https://mrbot-ki.de")
+        return RedirectResponse(f"{frontend_url}/dashboard/?outlook=success")
+        
+    except Exception as e:
+        logging.error(f"Error in Outlook OAuth callback: {e}")
+        traceback.print_exc()
+        # Redirect to frontend with error
+        frontend_url = os.getenv("FRONTEND_URL", "https://mrbot-ki.de")
+        return RedirectResponse(f"{frontend_url}/dashboard/?outlook=error&message={str(e)}")
+
+
+@router.get("/calendar/status")
+async def get_calendar_status(current_user: dict = Depends(get_current_user)):
+    """Get calendar connection status for current user"""
+    try:
+        user_id = current_user['id']
+        
+        google_creds = db.get_google_credentials(user_id)
+        outlook_creds = db.get_outlook_credentials(user_id)
+        
+        status = {
+            "google": {"connected": False},
+            "outlook": {"connected": False}
+        }
+        
+        if google_creds:
+            status['google'] = {
+                "connected": True,
+                "expires_at": google_creds.get('token_expiry')
+            }
+        
+        if outlook_creds:
+            status['outlook'] = {
+                "connected": True,
+                "expires_at": outlook_creds.get('token_expiry')
+            }
+        
+        return JSONResponse({
+            "success": True,
+            "calendars": status
+        })
+        
+    except Exception as e:
+        logging.error(f"Error getting calendar status: {e}")
+        return error_response(str(e), 500)
+
+
+@router.delete("/calendar/{provider}/disconnect")
+async def disconnect_calendar(provider: str, current_user: dict = Depends(get_current_user)):
+    """Disconnect a calendar provider"""
+    try:
+        if provider not in ['google', 'outlook']:
+            return error_response("Invalid provider. Must be 'google' or 'outlook'", 400)
+        
+        user_id = current_user['id']
+        
+        if provider == 'google':
+            success = db.delete_google_credentials(user_id)
+        elif provider == 'outlook':
+            success = db.delete_outlook_credentials(user_id)
+        else:
+            return error_response("Invalid provider", 400)
+        
+        if success:
+            return JSONResponse({
+                "success": True,
+                "message": f"{provider.capitalize()} Calendar disconnected successfully"
+            })
+        else:
+            return error_response(f"Failed to disconnect {provider}", 500)
+        
+    except Exception as e:
+        logging.error(f"Error disconnecting calendar: {e}")
+        return error_response(str(e), 500)
+
