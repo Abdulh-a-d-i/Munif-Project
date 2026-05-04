@@ -1104,3 +1104,27 @@ async def get_subscription_plans(
         traceback.print_exc()
         return error_response("Failed to fetch subscription plans.", 500)
 
+# ==================== SUBSCRIPTION PLAN HELPER ====================
+
+def _serialize_plan(plan: dict) -> dict:
+    import json as _json
+
+    if plan.get("features") is not None:
+        features = plan["features"]
+        if isinstance(features, str):
+            try:
+                features = _json.loads(features)
+            except Exception:
+                features = []
+        plan["features"] = features if isinstance(features, list) else []
+    else:
+        plan["features"] = []
+
+    for dt_field in ("created_at", "updated_at"):
+        if plan.get(dt_field) and hasattr(plan[dt_field], "isoformat"):
+            plan[dt_field] = plan[dt_field].isoformat()
+
+    if "price" in plan and plan["price"] is not None:
+        plan["price"] = float(plan["price"])
+
+    return plan
