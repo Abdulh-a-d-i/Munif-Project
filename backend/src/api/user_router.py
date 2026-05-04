@@ -12,7 +12,8 @@ from src.api.base_models import (
     UserLogin,
     UserRegister,
     LoginResponse,
-    BusinessDetailsRequest
+    BusinessDetailsRequest,
+    SubscriptionPlanOut,
 )
 from src.utils.db import PGDB
 from src.utils.mail_management import Send_Mail
@@ -1064,5 +1065,42 @@ def add_presigned_urls_to_call(call: dict) -> dict:
     return call
 
 
-
+# ---------- PUBLIC / USER: GET /subscription-plans ---------------------------
+ 
+@router.get("/subscription-plans")
+async def get_subscription_plans(
+    include_inactive: bool = Query(
+        default=False,
+        description="Admins can pass true to see deactivated plans too."
+    ),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    **All authenticated users** — List available subscription plans.
+ 
+    - Regular users always see only active plans.
+    - Admins may additionally request inactive plans via `?include_inactive=true`.
+ 
+    Plans are ordered by `sort_order` (ascending) so the admin controls
+    the display sequence on the pricing page.
+    """
+    # Non-admins are locked to active-only regardless of the query param
+    if not current_user.get("is_admin"):
+        include_inactive = False
+ 
+    try:
+        plans = db.get_all_subscription_plans(include_inactive=include_inactive)
+        serialized = [_serialize_plan(p) for p in plans]
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "total": len(serialized),
+                "data": serialized,
+            },
+        )
+    except Exception as e:
+        logging.error(f"Error fetching subscription plans: {e}")
+        traceback.print_exc()
+        return error_response("Failed to fetch subscription plans.", 500)
 

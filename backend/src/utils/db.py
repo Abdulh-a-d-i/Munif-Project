@@ -58,6 +58,7 @@ class PGDB:
         self.create_outlook_credentials_table()
         self.ensure_agent_schema_migration()
         self.ensure_user_schema_migration()
+        self.create_subscription_plans_table()
 
 
     def get_connection(self):
@@ -2811,3 +2812,167 @@ class PGDB:
                   return cursor.fetchall()
 
 
+# ==================== SUBSCRIPTION PLANS TABLE ====================
+ 
+    def create_subscription_plans_table(self):
+        """
+        Create subscription_plans table.
+        Admin sets plans; all users can read them.
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS subscription_plans (
+                            id SERIAL PRIMARY KEY,
+                            name VARCHAR(100) NOT NULL,
+                            description TEXT,
+                            price DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+                            currency VARCHAR(10) NOT NULL DEFAULT 'USD',
+                            included_minutes INTEGER NOT NULL DEFAULT 0,
+                            max_agents INTEGER NOT NULL DEFAULT 1,
+                            features JSONB DEFAULT '[]'::jsonb,
+                            is_active BOOLEAN DEFAULT TRUE,
+                            is_popular BOOLEAN DEFAULT FALSE,
+                            sort_order INTEGER DEFAULT 0,
+                            created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_subscription_plans_active
+                        ON subscription_plans(is_active, sort_order);
+                    """)
+                conn.commit()
+                logging.info(" subscription_plans table created")
+            except Exception as e:
+                conn.rollback()
+                logging.error(f" Error creating subscription_plans table: {e}")
+                raise
+ 
+    def create_subscription_plan(self, plan_data: dict, admin_id: int) -> dict:
+        """
+        Admin creates or upserts a subscription plan.
+        Returns the newly created plan row.
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute("""
+                        INSERT INTO subscription_plans (
+                            name, description, price, currency,
+                            included_minutes, max_agents, features,
+                            is_active, is_popular, sort_order, created_by
+                        ) VALUES (
+                            %(name)s, %(description)s, %(price)s, %(currency)s,
+                            %(included_minutes)s, %(max_agents)s, %(features)s,
+                            %(is_active)s, %(is_popular)s, %(sort_order)s, %(created_by)s
+                        )
+                        RETURNING *;
+                    """, {
+                        "name": plan_data["name"],
+                        "description": plan_data.get("description"),
+                        "price": plan_data.get("price", 0.00),
+                        "currency": plan_data.get("currency", "USD"),
+                        "included_minutes": plan_data.get("included_minutes", 0),
+                        "max_agents": plan_data.get("max_agents", 1),
+                        "features": json.dumps(plan_data.get("features", [])),
+                        "is_active": plan_data.get("is_active", True),
+                        "is_popular": plan_data.get("is_popular", False),
+                        "sort_order": plan_data.get("sort_order", 0),
+                        "created_by": admin_id
+                    })
+                    row = cursor.fetchone()
+                conn.commit()
+                logging.info(f" Subscription plan '{row['name']}' created by admin {admin_id}")
+                return dict(row)
+            except Exception as e:
+                conn.rollback()
+                logging.error(f" Error creating subscription plan: {e}")
+                raise
+ 
+    def get_all_subscription_plans(self, include_inactive: bool = False) -> list:
+        """
+        Fetch all subscription plans ordered by sort_order.
+        Users get only active plans; admins can pass include_inactive=True.
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                query = """
+                    SELECT
+                        id, name, description, price, currency,
+                        included_minutes, max_agents, features,
+                        is_active, is_popular, sort_order,
+                        created_at, updated_at
+                    FROM subscription_plans
+                """
+                if not include_inactive:
+                    query += " WHERE is_active = TRUE"
+                query += " ORDER BY sort_order ASC, created_at ASC;"
+                cursor.execute(query)
+                return [dict(row) for row in cursor.fetchall()]
+ 
+    def update_subscription_plan(self, plan_id: int, update_data: dict) -> dict:
+        """
+        Admin updates an existing subscription plan (partial update).
+        """
+        allowed_fields = {
+            "name", "description", "price", "currency",
+            "included_minutes", "max_agents", "features",
+            "is_active", "is_popular", "sort_order"
+        }
+        fields_to_update = {
+            k: v for k, v in update_data.items()
+            if k in allowed_fields and v is not None
+        }
+        if not fields_to_update:
+            raise ValueError("No valid fields provided for update.")
+ 
+        if "features" in fields_to_update:
+            fields_to_update["features"] = json.dumps(fields_to_update["features"])
+ 
+        set_clause = ", ".join(f"{col} = %({col})s" for col in fields_to_update)
+        fields_to_update["plan_id"] = plan_id
+        fields_to_update["updated_at"] = datetime.utcnow()
+ 
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute(f"""
+                        UPDATE subscription_plans
+                        SET {set_clause}, updated_at = %(updated_at)s
+                        WHERE id = %(plan_id)s
+                        RETURNING *;
+                    """, fields_to_update)
+                    row = cursor.fetchone()
+                    if not row:
+                        raise ValueError(f"Subscription plan {plan_id} not found.")
+                conn.commit()
+                logging.info(f" Subscription plan {plan_id} updated")
+                return dict(row)
+            except Exception as e:
+                conn.rollback()
+                logging.error(f" Error updating subscription plan: {e}")
+                raise
+ 
+    def delete_subscription_plan(self, plan_id: int) -> bool:
+        """
+        Soft-delete a subscription plan (sets is_active = FALSE).
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        UPDATE subscription_plans
+                        SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING id;
+                    """, (plan_id,))
+                    row = cursor.fetchone()
+                conn.commit()
+                return bool(row)
+            except Exception as e:
+                conn.rollback()
+                logging.error(f" Error soft-deleting subscription plan: {e}")
+                raise
