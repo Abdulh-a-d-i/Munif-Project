@@ -288,44 +288,39 @@ class BookAppointmentResponse(BaseModel):
  
 class SubscriptionPlanCreate(BaseModel):
     """
-    Admin uses this to create a new subscription plan.
-    Shown to all users on the pricing/plans page.
+    Admin creates a subscription plan and assigns it to a user in one step.
     """
-    name: str = Field(..., min_length=1, max_length=100, description="Plan display name, e.g. 'Starter', 'Pro'")
+    name: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = Field(default=None, max_length=500)
-    price: float = Field(..., ge=0, description="Plan price (0 = free)")
+    price: float = Field(..., ge=0)
     currency: str = Field(default="USD", max_length=10)
-    included_minutes: int = Field(..., ge=0, description="Call minutes included in this plan")
-    max_agents: int = Field(default=1, ge=1, description="Maximum agents the user can create")
-    features: Optional[List[str]] = Field(default=[], description="List of feature bullet points shown to users")
-    is_active: bool = Field(default=True, description="Whether this plan is visible to users")
-    is_popular: bool = Field(default=False, description="Mark as 'Most Popular' on pricing page")
-    sort_order: int = Field(default=0, ge=0, description="Display order (lower = shown first)")
+    included_minutes: int = Field(..., ge=0)
+    max_agents: int = Field(default=1, ge=1)
+    features: Optional[List[str]] = Field(default=[])
+    is_active: bool = Field(default=True)
     user_id: int = Field(..., gt=0, description="User to assign this plan to")
  
     class Config:
         json_schema_extra = {
             "example": {
-                "name": "Pro",
+                "name": "Business Plan",
                 "description": "Perfect for growing businesses",
                 "price": 49.99,
                 "currency": "USD",
                 "included_minutes": 500,
                 "max_agents": 5,
-                "features": ["500 call minutes/month", "Up to 5 agents", "Priority support", "Analytics dashboard"],
+                "features": ["500 call minutes/month", "Up to 5 agents", "Priority support"],
                 "is_active": True,
-                "is_popular": True,
-                "sort_order": 1,
-                "user_id": 1
+                "user_id": 3
             }
         }
  
  
 class SubscriptionPlanUpdate(BaseModel):
     """
-    Admin uses this to partially update an existing plan.
-    All fields are optional — only provided fields are updated.
+    Admin updates a plan assigned to a specific user (identified by user_id).
     """
+    user_id: int = Field(..., gt=0, description="User whose plan to update")
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     description: Optional[str] = Field(None, max_length=500)
     price: Optional[float] = Field(None, ge=0)
@@ -334,16 +329,15 @@ class SubscriptionPlanUpdate(BaseModel):
     max_agents: Optional[int] = Field(None, ge=1)
     features: Optional[List[str]] = Field(None)
     is_active: Optional[bool] = Field(None)
-    is_popular: Optional[bool] = Field(None)
-    sort_order: Optional[int] = Field(None, ge=0)
-    user_id: Optional[int] = Field(default=None, gt=0)
  
     class Config:
         json_schema_extra = {
             "example": {
+                "user_id": 3,
+                "name": "Updated Plan Name",
                 "price": 59.99,
                 "included_minutes": 600,
-                "is_popular": True
+                "is_active": False
             }
         }
  
@@ -361,8 +355,6 @@ class SubscriptionPlanOut(BaseModel):
     included_minutes: int
     max_agents: int
     features: List[str] = []
-    is_active: bool
-    is_popular: bool
-    sort_order: int
+    is_active: bool = True
     created_at: datetime
     updated_at: datetime

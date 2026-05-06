@@ -3522,63 +3522,58 @@ def _serialize_plan(plan: dict) -> dict:
     return plan
  
  
-# ---------- ADMIN: POST /subscription-plans ----------------------------------
- 
-@router.post("/subscription-plans")
+@router.post("/subscription-plans", response_model=SubscriptionPlanOut)
 async def admin_create_subscription_plan(
     payload: SubscriptionPlanCreate,
     current_user: dict = Depends(get_current_user),
 ):
+    """
+    **Admin only** — Create a new subscription plan.
+ 
+    Plans created here are immediately visible to all users via
+    `GET /subscription-plans` (if `is_active=True`).
+ 
+    Raises 403 if the caller is not an admin.
+    """
     if not current_user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin access required.")
-
+ 
     try:
         plan = db.create_subscription_plan(
             plan_data=payload.dict(),
             admin_id=current_user["id"],
         )
-        assigned_to = None
-        if payload.user_id:
-            assigned_to = db.assign_plan_to_user(
-                user_id=payload.user_id,
-                plan_id=plan["id"],
-                admin_id=current_user["id"]
-            )
-        return JSONResponse(status_code=201, content={
-            "success": True,
-            "data": _serialize_plan(plan),
-            "assigned_to": assigned_to  
-        })
-    except ValueError as e:
-        return error_response(str(e), 404)
+        return JSONResponse(
+            status_code=201,
+            content={"success": True, "data": _serialize_plan(plan)},
+        )
     except Exception as e:
         logging.error(f"Error creating subscription plan: {e}")
         traceback.print_exc()
         return error_response("Failed to create subscription plan.", 500)
  
  
-# ---------- ADMIN: PUT /subscription-plans/{plan_id} -------------------------
+# ---------- ADMIN: PUT /subscription-plans -------------------------
  
-@router.put("/subscription-plans/{plan_id}")
+@router.put("/subscription-plans")
 async def admin_update_subscription_plan(
-    plan_id: int,
     payload: SubscriptionPlanUpdate,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    **Admin only** — Partially update an existing subscription plan.
- 
-    Only the fields you send in the request body will be changed.
+    Admin only — Update the subscription plan assigned to a user (by user_id in body).
     """
     if not current_user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin access required.")
  
     update_data = payload.dict(exclude_none=True)
+    user_id = update_data.pop("user_id")
+ 
     if not update_data:
         return error_response("No fields provided for update.", 400)
  
     try:
-        updated = db.update_subscription_plan(plan_id, update_data)
+        updated = db.update_subscription_plan_by_user(user_id, update_data)
         return JSONResponse(
             status_code=200,
             content={"success": True, "data": _serialize_plan(updated)},
@@ -3586,38 +3581,33 @@ async def admin_update_subscription_plan(
     except ValueError as e:
         return error_response(str(e), 404)
     except Exception as e:
-        logging.error(f"Error updating subscription plan {plan_id}: {e}")
+        logging.error(f"Error updating subscription plan for user {user_id}: {e}")
         traceback.print_exc()
         return error_response("Failed to update subscription plan.", 500)
  
  
-# ---------- ADMIN: DELETE /subscription-plans/{plan_id} ----------------------
+# ---------- ADMIN: DELETE /subscription-plans/{user_id} ----------------------
  
-@router.delete("/subscription-plans/{plan_id}")
+@router.delete("/subscription-plans/{user_id}")
 async def admin_delete_subscription_plan(
-    plan_id: int,
+    user_id: int,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    **Admin only** — Soft-delete a subscription plan (sets is_active = False).
- 
-    The plan disappears from the user-facing list immediately but is
-    preserved in the database for audit purposes.
+    Admin only — Delete the subscription plan assigned to a user (by user_id).
     """
     if not current_user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin access required.")
  
     try:
-        deleted = db.delete_subscription_plan(plan_id)
+        deleted = db.delete_subscription_plan_by_user(user_id)
         if not deleted:
-            return error_response(f"Subscription plan {plan_id} not found.", 404)
+            return error_response(f"No plan found for user {user_id}.", 404)
         return JSONResponse(
             status_code=200,
-            content={"success": True, "message": f"Plan {plan_id} deactivated."},
+            content={"success": True, "message": f"Plan removed for user {user_id}."},
         )
     except Exception as e:
-        logging.error(f"Error deleting subscription plan {plan_id}: {e}")
+        logging.error(f"Error deleting subscription plan for user {user_id}: {e}")
         traceback.print_exc()
         return error_response("Failed to delete subscription plan.", 500)
- 
- 
