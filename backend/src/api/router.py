@@ -3524,31 +3524,33 @@ def _serialize_plan(plan: dict) -> dict:
  
 # ---------- ADMIN: POST /subscription-plans ----------------------------------
  
-@router.post("/subscription-plans", response_model=SubscriptionPlanOut)
+@router.post("/subscription-plans")
 async def admin_create_subscription_plan(
     payload: SubscriptionPlanCreate,
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    **Admin only** — Create a new subscription plan.
- 
-    Plans created here are immediately visible to all users via
-    `GET /subscription-plans` (if `is_active=True`).
- 
-    Raises 403 if the caller is not an admin.
-    """
     if not current_user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin access required.")
- 
+
     try:
         plan = db.create_subscription_plan(
             plan_data=payload.dict(),
             admin_id=current_user["id"],
         )
-        return JSONResponse(
-            status_code=201,
-            content={"success": True, "data": _serialize_plan(plan)},
-        )
+        assigned_to = None
+        if payload.user_id:
+            assigned_to = db.assign_plan_to_user(
+                user_id=payload.user_id,
+                plan_id=plan["id"],
+                admin_id=current_user["id"]
+            )
+        return JSONResponse(status_code=201, content={
+            "success": True,
+            "data": _serialize_plan(plan),
+            "assigned_to": assigned_to  
+        })
+    except ValueError as e:
+        return error_response(str(e), 404)
     except Exception as e:
         logging.error(f"Error creating subscription plan: {e}")
         traceback.print_exc()

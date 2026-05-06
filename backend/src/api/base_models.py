@@ -301,6 +301,7 @@ class SubscriptionPlanCreate(BaseModel):
     is_active: bool = Field(default=True, description="Whether this plan is visible to users")
     is_popular: bool = Field(default=False, description="Mark as 'Most Popular' on pricing page")
     sort_order: int = Field(default=0, ge=0, description="Display order (lower = shown first)")
+    user_id: int = Field(..., gt=0, description="User to assign this plan to")
  
     class Config:
         json_schema_extra = {
@@ -314,7 +315,8 @@ class SubscriptionPlanCreate(BaseModel):
                 "features": ["500 call minutes/month", "Up to 5 agents", "Priority support", "Analytics dashboard"],
                 "is_active": True,
                 "is_popular": True,
-                "sort_order": 2
+                "sort_order": 1,
+                "user_id": 1
             }
         }
  
@@ -334,6 +336,7 @@ class SubscriptionPlanUpdate(BaseModel):
     is_active: Optional[bool] = Field(None)
     is_popular: Optional[bool] = Field(None)
     sort_order: Optional[int] = Field(None, ge=0)
+    user_id: Optional[int] = Field(default=None, gt=0)
  
     class Config:
         json_schema_extra = {
@@ -349,6 +352,7 @@ class SubscriptionPlanOut(BaseModel):
     """
     Response model for a subscription plan (returned to users and admins).
     """
+    user_id: int
     id: int
     name: str
     description: Optional[str] = None

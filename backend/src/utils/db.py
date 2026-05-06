@@ -2816,8 +2816,9 @@ class PGDB:
  
     def create_subscription_plans_table(self):
         """
-        Create subscription_plans table.
-        Admin sets plans; all users can read them.
+        Create subscription_plans and user_plans tables in one flow.
+        subscription_plans: admin manages plans visible to all users.
+        user_plans: stores which plan is assigned to which user (one per user).
         """
         with self.get_connection_context() as conn:
             try:
@@ -2844,11 +2845,25 @@ class PGDB:
                         CREATE INDEX IF NOT EXISTS idx_subscription_plans_active
                         ON subscription_plans(is_active, sort_order);
                     """)
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS user_plans (
+                            id SERIAL PRIMARY KEY,
+                            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                            plan_id INTEGER NOT NULL REFERENCES subscription_plans(id) ON DELETE CASCADE,
+                            assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                            assigned_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            CONSTRAINT unique_user_plan UNIQUE (user_id)
+                        );
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_user_plans_user
+                        ON user_plans(user_id);
+                    """)
                 conn.commit()
-                logging.info(" subscription_plans table created")
+                logging.info("subscription_plans and user_plans tables created")
             except Exception as e:
                 conn.rollback()
-                logging.error(f" Error creating subscription_plans table: {e}")
+                logging.error(f"Error creating subscription tables: {e}")
                 raise
  
     def create_subscription_plan(self, plan_data: dict, admin_id: int) -> dict:
@@ -2975,4 +2990,102 @@ class PGDB:
             except Exception as e:
                 conn.rollback()
                 logging.error(f" Error soft-deleting subscription plan: {e}")
+                raise
+    def assign_plan_to_user(self, user_id: int, plan_id: int, admin_id: int) -> dict:
+        """
+        Assign a subscription plan to a user.
+        If user already has a plan it gets replaced (upsert on user_id).
+        """
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute(
+                        "SELECT id, name FROM subscription_plans WHERE id = %s AND is_active = TRUE",
+                        (plan_id,)
+                    )
+                    plan = cursor.fetchone()
+                    if not plan:
+                        raise ValueError(f"Plan {plan_id} not found or inactive.")
+ 
+                    cursor.execute(
+                        "SELECT id, username, email FROM users WHERE id = %s",
+                        (user_id,)
+                    )
+                    user = cursor.fetchone()
+                    if not user:
+                        raise ValueError(f"User {user_id} not found.")
+ 
+                    cursor.execute("""
+                        INSERT INTO user_plans (user_id, plan_id, assigned_by, assigned_at)
+                        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id)
+                        DO UPDATE SET
+                            plan_id     = EXCLUDED.plan_id,
+                            assigned_by = EXCLUDED.assigned_by,
+                            assigned_at = CURRENT_TIMESTAMP
+                        RETURNING *;
+                    """, (user_id, plan_id, admin_id))
+ 
+                    row = cursor.fetchone()
+                conn.commit()
+                logging.info(f"Plan '{plan['name']}' assigned to user {user_id} by admin {admin_id}")
+                return {
+                    "user_id": user_id,
+                    "username": user["username"],
+                    "email": user["email"],
+                    "plan_id": plan_id,
+                    "plan_name": plan["name"],
+                    "assigned_at": row["assigned_at"].isoformat()
+                }
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error assigning plan: {e}")
+                raise
+ 
+    def get_user_assigned_plan(self, user_id: int) -> dict:
+        """
+        Get the subscription plan assigned to a user.
+        Returns None if no plan assigned yet.
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT
+                        sp.id,
+                        sp.name,
+                        sp.description,
+                        sp.price,
+                        sp.currency,
+                        sp.included_minutes,
+                        sp.max_agents,
+                        sp.features,
+                        sp.is_popular,
+                        sp.sort_order,
+                        up.assigned_at,
+                        sp.created_at,
+                        sp.updated_at
+                    FROM user_plans up
+                    JOIN subscription_plans sp ON sp.id = up.plan_id
+                    WHERE up.user_id = %s
+                      AND sp.is_active = TRUE
+                """, (user_id,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
+ 
+    def remove_user_plan(self, user_id: int) -> bool:
+        """Remove the assigned plan from a user."""
+        with self.get_connection_context() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        DELETE FROM user_plans
+                        WHERE user_id = %s
+                        RETURNING id;
+                    """, (user_id,))
+                    row = cursor.fetchone()
+                conn.commit()
+                return bool(row)
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error removing user plan: {e}")
                 raise
