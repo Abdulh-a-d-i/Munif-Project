@@ -293,10 +293,10 @@ class SubscriptionPlanCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = Field(default=None, max_length=500)
     price: float = Field(..., ge=0)
-    currency: str = Field(default="USD", max_length=10)
+    currency: Optional[str] = Field(default="USD", max_length=10)
     included_minutes: int = Field(..., ge=0)
     max_agents: int = Field(default=1, ge=1)
-    features: Optional[List[str]] = Field(default=[])
+    features: Optional[str] = Field(default=None)
     is_active: bool = Field(default=True)
     user_id: int = Field(..., gt=0, description="User to assign this plan to")
  
@@ -309,7 +309,7 @@ class SubscriptionPlanCreate(BaseModel):
                 "currency": "USD",
                 "included_minutes": 500,
                 "max_agents": 5,
-                "features": ["500 call minutes/month", "Up to 5 agents", "Priority support"],
+                "features": "500 call minutes/month, Up to 5 agents, Priority support",
                 "is_active": True,
                 "user_id": 3
             }

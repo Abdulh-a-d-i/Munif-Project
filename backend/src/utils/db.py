@@ -2831,7 +2831,7 @@ class PGDB:
                             currency VARCHAR(10) NOT NULL DEFAULT 'USD',
                             included_minutes INTEGER NOT NULL DEFAULT 0,
                             max_agents INTEGER NOT NULL DEFAULT 1,
-                            features JSONB DEFAULT '[]'::jsonb,
+                            features TEXT,
                             is_active BOOLEAN DEFAULT TRUE,
                             created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -2875,7 +2875,7 @@ class PGDB:
                         "currency": plan_data.get("currency", "USD"),
                         "included_minutes": plan_data.get("included_minutes", 0),
                         "max_agents": plan_data.get("max_agents", 1),
-                        "features": json.dumps(plan_data.get("features", [])),
+                        "features": plan_data.get("features"),
                         "is_active": plan_data.get("is_active", True),
                         "created_by": admin_id
                     })
@@ -2924,8 +2924,6 @@ class PGDB:
         if not fields_to_update:
             raise ValueError("No valid fields provided for update.")
  
-        if "features" in fields_to_update:
-            fields_to_update["features"] = json.dumps(fields_to_update["features"])
  
         set_clause = ", ".join(f"{col} = %({col})s" for col in fields_to_update)
         fields_to_update["plan_id"] = plan_id
