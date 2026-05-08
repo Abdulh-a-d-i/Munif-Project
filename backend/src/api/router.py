@@ -3522,7 +3522,7 @@ def _serialize_plan(plan: dict) -> dict:
     return plan
  
  
-@router.post("/subscription-plans", response_model=SubscriptionPlanOut)
+@router.post("/create-subscription-plans", response_model=SubscriptionPlanOut)
 async def admin_create_subscription_plan(
     payload: SubscriptionPlanCreate,
     current_user: dict = Depends(get_current_user),
@@ -3555,7 +3555,7 @@ async def admin_create_subscription_plan(
  
 # ---------- ADMIN: PUT /subscription-plans -------------------------
  
-@router.put("/subscription-plans")
+@router.put("/update-subscription-plans")
 async def admin_update_subscription_plan(
     payload: SubscriptionPlanUpdate,
     current_user: dict = Depends(get_current_user),
@@ -3588,7 +3588,7 @@ async def admin_update_subscription_plan(
  
 # ---------- ADMIN: DELETE /subscription-plans/{user_id} ----------------------
  
-@router.delete("/subscription-plans/{user_id}")
+@router.delete("/delete-subscription-plans/{user_id}")
 async def admin_delete_subscription_plan(
     user_id: int,
     current_user: dict = Depends(get_current_user),

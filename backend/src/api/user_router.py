@@ -1067,7 +1067,7 @@ def add_presigned_urls_to_call(call: dict) -> dict:
 
 # ---------- PUBLIC / USER: GET /subscription-plans ---------------------------
  
-@router.get("/subscription-plans")
+@router.get("/get-subscription-plans")
 async def get_subscription_plans(
     include_inactive: bool = Query(
         default=False,
