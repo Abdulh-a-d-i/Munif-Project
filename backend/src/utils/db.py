@@ -2826,7 +2826,6 @@ class PGDB:
                         CREATE TABLE IF NOT EXISTS subscription_plans (
                             id SERIAL PRIMARY KEY,
                             name VARCHAR(100) NOT NULL,
-                            description TEXT,
                             price DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
                             currency VARCHAR(10) NOT NULL DEFAULT 'USD',
                             included_minutes INTEGER NOT NULL DEFAULT 0,
@@ -2859,18 +2858,17 @@ class PGDB:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                     cursor.execute("""
                         INSERT INTO subscription_plans (
-                            name, description, price, currency,
+                            name, price, currency,
                             included_minutes, max_agents, features,
                             is_active, created_by
                         ) VALUES (
-                            %(name)s, %(description)s, %(price)s, %(currency)s,
+                            %(name)s, %(price)s, %(currency)s,
                             %(included_minutes)s, %(max_agents)s, %(features)s,
                             %(is_active)s, %(created_by)s
                         )
                         RETURNING *;
                     """, {
                         "name": plan_data.get("name"),
-                        "description": plan_data.get("description"),
                         "price": plan_data.get("price", 0.00),
                         "currency": plan_data.get("currency", "USD"),
                         "included_minutes": plan_data.get("included_minutes", 0),
@@ -2880,6 +2878,20 @@ class PGDB:
                         "created_by": admin_id
                     })
                     row = cursor.fetchone()
+
+                    # Auto assign plan to user
+                    user_id = plan_data.get("user_id")
+                    if user_id:
+                        cursor.execute("""
+                            INSERT INTO user_plans (user_id, plan_id, assigned_by, assigned_at)
+                            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                            ON CONFLICT (user_id)
+                            DO UPDATE SET
+                                plan_id     = EXCLUDED.plan_id,
+                                assigned_by = EXCLUDED.assigned_by,
+                                assigned_at = CURRENT_TIMESTAMP;
+                        """, (user_id, row["id"], admin_id))
+
                 conn.commit()
                 logging.info(f" Subscription plan '{row['name']}' created by admin {admin_id}")
                 return dict(row)
@@ -2888,32 +2900,32 @@ class PGDB:
                 logging.error(f" Error creating subscription plan: {e}")
                 raise
  
-    def get_all_subscription_plans(self, include_inactive: bool = False) -> list:
+    def get_user_assigned_plan(self, user_id: int) -> dict:
         """
-        Fetch all subscription plans ordered by created_at.
-        Users get only active plans; admins can pass include_inactive=True.
+        Get the subscription plan assigned to a specific user.
+        Returns None if no plan assigned.
         """
         with self.get_connection_context() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                query = """
+                cursor.execute("""
                     SELECT
-                        id, name, description, price, currency,
-                        included_minutes, max_agents, features,
-                        is_active, created_at, updated_at
-                    FROM subscription_plans
-                """
-                if not include_inactive:
-                    query += " WHERE is_active = TRUE"
-                query += " ORDER BY created_at ASC;"
-                cursor.execute(query)
-                return [dict(row) for row in cursor.fetchall()]
+                        sp.id, sp.name, sp.price, sp.currency,
+                        sp.included_minutes, sp.max_agents, sp.features,
+                        sp.created_at, sp.updated_at,
+                        up.user_id, up.assigned_at
+                    FROM user_plans up
+                    JOIN subscription_plans sp ON sp.id = up.plan_id
+                    WHERE up.user_id = %s
+                """, (user_id,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
  
     def update_subscription_plan(self, plan_id: int, update_data: dict) -> dict:
         """
         Admin updates an existing subscription plan (partial update).
         """
         allowed_fields = {
-            "name", "description", "price", "currency",
+            "name", "price", "currency",
             "included_minutes", "max_agents", "features",
             "is_active"
         }
@@ -2975,8 +2987,8 @@ class PGDB:
         Identifies the plan via user_id from user_plans table.
         """
         allowed_fields = {
-            "name", "description", "price", "currency",
-            "included_minutes", "max_agents", "features"
+            "name", "price", "currency",
+            "included_minutes", "max_agents", "features" , "is_active"
         }
         fields_to_update = {
             k: v for k, v in update_data.items()
@@ -2985,8 +2997,6 @@ class PGDB:
         if not fields_to_update:
             raise ValueError("No valid fields provided for update.")
  
-        if "features" in fields_to_update:
-            fields_to_update["features"] = json.dumps(fields_to_update["features"])
  
         set_clause = ", ".join(f"{col} = %({col})s" for col in fields_to_update)
         fields_to_update["user_id"] = user_id

@@ -3566,7 +3566,7 @@ async def admin_update_subscription_plan(
     if not current_user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin access required.")
  
-    update_data = payload.dict(exclude_none=True)
+    update_data = payload.dict(exclude_unset=True)
     user_id = update_data.pop("user_id")
  
     if not update_data:

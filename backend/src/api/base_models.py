@@ -291,7 +291,6 @@ class SubscriptionPlanCreate(BaseModel):
     Admin creates a subscription plan and assigns it to a user in one step.
     """
     name: str = Field(..., min_length=1, max_length=100)
-    description: Optional[str] = Field(default=None, max_length=500)
     price: float = Field(..., ge=0)
     currency: Optional[str] = Field(default="USD", max_length=10)
     included_minutes: int = Field(..., ge=0)
@@ -304,14 +303,13 @@ class SubscriptionPlanCreate(BaseModel):
         json_schema_extra = {
             "example": {
                 "name": "Business Plan",
-                "description": "Perfect for growing businesses",
                 "price": 49.99,
                 "currency": "USD",
                 "included_minutes": 500,
                 "max_agents": 5,
                 "features": "500 call minutes/month, Up to 5 agents, Priority support",
                 "is_active": True,
-                "user_id": 3
+                "user_id": 2
             }
         }
  
@@ -322,21 +320,22 @@ class SubscriptionPlanUpdate(BaseModel):
     """
     user_id: int = Field(..., gt=0, description="User whose plan to update")
     name: Optional[str] = Field(None, min_length=1, max_length=100)
-    description: Optional[str] = Field(None, max_length=500)
     price: Optional[float] = Field(None, ge=0)
     currency: Optional[str] = Field(None, max_length=10)
     included_minutes: Optional[int] = Field(None, ge=0)
     max_agents: Optional[int] = Field(None, ge=1)
-    features: Optional[List[str]] = Field(None)
+    features: Optional[str] = Field(None)
     is_active: Optional[bool] = Field(None)
  
     class Config:
         json_schema_extra = {
             "example": {
-                "user_id": 3,
+                "user_id": 2,
                 "name": "Updated Plan Name",
                 "price": 59.99,
                 "included_minutes": 600,
+                "max_agents": 5,
+                "features":"",
                 "is_active": False
             }
         }
@@ -349,12 +348,10 @@ class SubscriptionPlanOut(BaseModel):
     user_id: int
     id: int
     name: str
-    description: Optional[str] = None
     price: float
     currency: str
     included_minutes: int
     max_agents: int
-    features: List[str] = []
-    is_active: bool = True
+    features: str
     created_at: datetime
     updated_at: datetime

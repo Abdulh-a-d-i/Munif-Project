@@ -1067,64 +1067,45 @@ def add_presigned_urls_to_call(call: dict) -> dict:
 
 # ---------- PUBLIC / USER: GET /subscription-plans ---------------------------
  
-@router.get("/get-subscription-plans")
-async def get_subscription_plans(
-    include_inactive: bool = Query(
-        default=False,
-        description="Admins can pass true to see deactivated plans too."
-    ),
+@router.get("/get-subscription-plans/{user_id}")
+async def get_subscription_plan_by_user(
+    user_id: int,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    **All authenticated users** — List available subscription plans.
- 
-    - Regular users always see only active plans.
-    - Admins may additionally request inactive plans via `?include_inactive=true`.
- 
-    Plans are ordered by `sort_order` (ascending) so the admin controls
-    the display sequence on the pricing page.
+    Get the subscription plan assigned to a specific user.
+    Admin can get any user plan. Regular user can only get their own.
     """
-    # Non-admins are locked to active-only regardless of the query param
-    if not current_user.get("is_admin"):
-        include_inactive = False
+    if not current_user.get("is_admin") and current_user["id"] != user_id:
+        return error_response("Access denied.", 403)
  
     try:
-        plans = db.get_all_subscription_plans(include_inactive=include_inactive)
-        serialized = [_serialize_plan(p) for p in plans]
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "total": len(serialized),
-                "data": serialized,
-            },
-        )
+        user = db.get_user_by_id(user_id)
+        if not user:
+            return error_response(f"User {user_id} not found.", 404)
+ 
+        plan = db.get_user_assigned_plan(user_id=user_id)
+        if not plan:
+            return JSONResponse(status_code=404, content={
+                "success": False,
+                "message": f"No plan assigned to user {user_id}."
+            })
+ 
+        return JSONResponse(status_code=200, content={
+            "success": True,
+            "data": _serialize_plan(plan)
+        })
     except Exception as e:
-        logging.error(f"Error fetching subscription plans: {e}")
+        logging.error(f"Error fetching plan for user {user_id}: {e}")
         traceback.print_exc()
-        return error_response("Failed to fetch subscription plans.", 500)
+        return error_response("Failed to fetch subscription plan.", 500)
 
 # ==================== SUBSCRIPTION PLAN HELPER ====================
 
 def _serialize_plan(plan: dict) -> dict:
-    import json as _json
-
-    if plan.get("features") is not None:
-        features = plan["features"]
-        if isinstance(features, str):
-            try:
-                features = _json.loads(features)
-            except Exception:
-                features = []
-        plan["features"] = features if isinstance(features, list) else []
-    else:
-        plan["features"] = []
-
-    for dt_field in ("created_at", "updated_at"):
+    for dt_field in ("created_at", "updated_at", "assigned_at"):
         if plan.get(dt_field) and hasattr(plan[dt_field], "isoformat"):
             plan[dt_field] = plan[dt_field].isoformat()
-
     if "price" in plan and plan["price"] is not None:
         plan["price"] = float(plan["price"])
-
     return plan
