@@ -2909,7 +2909,7 @@ class PGDB:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("""
                     SELECT
-                        sp.id, sp.name, sp.price, sp.currency,
+                        sp.id, sp.name, sp.price, sp.is_active, sp.currency,
                         sp.included_minutes, sp.max_agents, sp.features,
                         sp.created_at, sp.updated_at,
                         up.user_id, up.assigned_at
