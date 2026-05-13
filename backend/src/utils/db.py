@@ -2813,11 +2813,11 @@ class PGDB:
 
 
 # ==================== SUBSCRIPTION PLANS TABLE ====================
- 
+
     def create_subscription_plans_table(self):
         """
-        Create subscription_plans table.
-        Admin sets plans; all users can read them.
+        Create subscription_plans and user_plans tables.
+        Admin sets plans; user_plans maps one plan per user.
         """
         with self.get_connection_context() as conn:
             try:
@@ -2841,12 +2841,24 @@ class PGDB:
                         CREATE INDEX IF NOT EXISTS idx_subscription_plans_active
                         ON subscription_plans(is_active);
                     """)
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS user_plans (
+                            user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                            plan_id INTEGER NOT NULL REFERENCES subscription_plans(id) ON DELETE CASCADE,
+                            assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                            assigned_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_user_plans_plan_id
+                        ON user_plans(plan_id);
+                    """)
                 conn.commit()
-                logging.info(" subscription_plans table created")
+                logging.info(" subscription_plans + user_plans tables created")
             except Exception as e:
                 conn.rollback()
                 logging.error(f" Error creating subscription_plans table: {e}")
-                raise
+                raise                      
  
     def create_subscription_plan(self, plan_data: dict, admin_id: int) -> dict:
         """
