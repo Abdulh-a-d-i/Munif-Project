@@ -2827,7 +2827,7 @@ class PGDB:
                             id SERIAL PRIMARY KEY,
                             name VARCHAR(100) NOT NULL,
                             price DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
-                            currency VARCHAR(10) NOT NULL DEFAULT 'USD',
+                            currency VARCHAR(10) NOT NULL DEFAULT 'EUR',
                             included_minutes INTEGER NOT NULL DEFAULT 0,
                             max_agents INTEGER NOT NULL DEFAULT 1,
                             features TEXT,

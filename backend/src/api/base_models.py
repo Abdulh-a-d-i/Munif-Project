@@ -292,7 +292,7 @@ class SubscriptionPlanCreate(BaseModel):
     """
     name: str = Field(..., min_length=1, max_length=100)
     price: float = Field(..., ge=0)
-    currency: Optional[str] = Field(default="USD", max_length=10)
+    currency: Optional[str] = Field(default="EUR", max_length=10)
     included_minutes: int = Field(..., ge=0)
     max_agents: int = Field(default=1, ge=1)
     features: Optional[str] = Field(default=None)
@@ -304,7 +304,7 @@ class SubscriptionPlanCreate(BaseModel):
             "example": {
                 "name": "Business Plan",
                 "price": 49.99,
-                "currency": "USD",
+                "currency": "EUR",
                 "included_minutes": 500,
                 "max_agents": 5,
                 "features": "500 call minutes/month, Up to 5 agents, Priority support",
