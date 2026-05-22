@@ -2921,6 +2921,13 @@ class PGDB:
                                 assigned_at = CURRENT_TIMESTAMP;
                         """, (user_id, row["id"], admin_id))
 
+                        # Dynamically update the agent's allowed minutes to match the subscription plan
+                        cursor.execute("""
+                            UPDATE agents 
+                            SET allowed_minutes = %s 
+                            WHERE user_id = %s OR admin_id = %s;
+                        """, (plan_data.get("included_minutes", 0), user_id, user_id))
+
                 conn.commit()
                 logging.info(f" Subscription plan '{row['name']}' created by admin {admin_id}")
                 return dict(row)
@@ -3051,6 +3058,14 @@ class PGDB:
                         RETURNING *;
                     """, fields_to_update)
                     updated = cursor.fetchone()
+
+                    # If included_minutes is updated, dynamically cascade this change to the user's agents
+                    if "included_minutes" in fields_to_update:
+                        cursor.execute("""
+                            UPDATE agents 
+                            SET allowed_minutes = %s 
+                            WHERE user_id = %s OR admin_id = %s;
+                        """, (fields_to_update["included_minutes"], user_id, user_id))
                 conn.commit()
                 logging.info(f"Subscription plan updated for user {user_id}")
                 return dict(updated)
