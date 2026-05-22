@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi import HTTPException, Response
+from twilio.twiml.voice_response import VoiceResponse, Dial
 from rich import print
 from src.api.base_models import (
     UserLogin,
@@ -1004,6 +1005,7 @@ async def get_agent_detail(
 async def create_agent(
     agent_name: str = Form(...),
     phone_number: str = Form(...),
+    transfer_number: str = Form(None),
     system_prompt: str = Form(...),
     voice_type: str = Form(None),  # Optional - can be empty
     language: str = Form("en"),
@@ -1090,6 +1092,7 @@ async def create_agent(
         agent_data = {
             "agent_name": agent_name,
             "phone_number": phone_number,
+            "transfer_number": transfer_number ,
             "system_prompt": system_prompt,
             "voice_type": voice_type,
             "language": language,
@@ -1172,6 +1175,7 @@ async def update_agent(
     agent_id: int,
     agent_name: str = Form(None),
     phone_number: str = Form(None),
+    transfer_number: str = Form(None),
     system_prompt: str = Form(None),
     voice_type: str = Form(None),
     language: str = Form(None),
@@ -3611,3 +3615,33 @@ async def admin_delete_subscription_plan(
         logging.error(f"Error deleting subscription plan for user {user_id}: {e}")
         traceback.print_exc()
         return error_response("Failed to delete subscription plan.", 500)
+    
+
+ 
+@router.get("/twiml/check/{phone_number}")
+async def twiml_status_check(phone_number: str):
+    """
+    Simple status check endpoint.
+    Returns agent status + minutes info for a phone number.
+    """
+    try:
+        agent = db.get_agent_by_phone(phone_number)
+        if not agent:
+            return JSONResponse({"available": False, "reason": "agent not found"}, status_code=404)
+ 
+        agent_id = agent.get("agent_id") or agent.get("id")
+        minutes_check = db.check_agent_minutes_available(agent_id)
+ 
+        return JSONResponse({
+            "available": agent.get("is_active") and minutes_check.get("available"),
+            "is_active": agent.get("is_active"),
+            "minutes_available": minutes_check.get("available"),
+            "used_minutes": minutes_check.get("used_minutes"),
+            "allowed_minutes": minutes_check.get("allowed_minutes"),
+            "remaining_minutes": minutes_check.get("remaining_minutes"),
+            "transfer_number": agent.get("transfer_number")
+        })
+    except Exception as e:
+        logging.error(f"Status check error: {e}")
+        return JSONResponse({"available": False, "reason": str(e)}, status_code=500)
+ 

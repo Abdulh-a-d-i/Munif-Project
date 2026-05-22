@@ -169,7 +169,8 @@ class PGDB:
                             is_active BOOLEAN DEFAULT TRUE,
                             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                             updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                            user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+                            user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                            Transfer_number VARCHAR(20) UNIQUE NOT NULL
                         );
                     """)
                     cursor.execute("""
@@ -240,7 +241,15 @@ class PGDB:
                         cursor.execute("ALTER TABLE agents ADD COLUMN used_minutes DOUBLE PRECISION DEFAULT 0.0;")
                         conn.commit()
                         logging.info(" used_minutes column ADDED successfully")
-                        
+
+                    # Check for transfer_number
+                    cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='transfer_number'")
+                    if not cursor.fetchone():
+                        logging.info("Adding transfer_number column to agents table...")
+                        cursor.execute("ALTER TABLE agents ADD COLUMN transfer_number VARCHAR(20) DEFAULT NULL;")
+                        conn.commit()
+                        logging.info("transfer_number column ADDED successfully")
+
             except Exception as e:
                 logging.error(f"Error adding agent fields: {e}")
                 # Try to rollback if possible
@@ -1743,9 +1752,9 @@ class PGDB:
                             owner_name, owner_email, avatar_url,
                             business_hours_start, business_hours_end,
                             allowed_minutes, used_minutes,
-                            admin_id, user_id
+                            admin_id, user_id, transfer_number
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING *;
                     """, (
                         agent_data["phone_number"],
@@ -1762,7 +1771,8 @@ class PGDB:
                         agent_data.get("allowed_minutes", 0),    # NEW
                         0,  # used_minutes starts at 0           # NEW
                         agent_data["admin_id"],
-                        agent_data.get("user_id")  # NEW: user assignment
+                        agent_data.get("user_id"),  # NEW: user assignment
+                        agent_data.get("transfer_number")  
                     ))
                     result = cursor.fetchone()
                 conn.commit()

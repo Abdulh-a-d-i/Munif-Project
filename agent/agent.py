@@ -24,6 +24,7 @@ from livekit.agents import (
 )
 from livekit.plugins import deepgram, elevenlabs, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.protocol.sip import TransferSIPParticipantRequest
 
 
 from datetime import datetime, timezone, timedelta
@@ -31,7 +32,7 @@ from datetime import datetime, timezone, timedelta
 # German timezone (UTC+1)
 german_tz = timezone(timedelta(hours=1))
 now = datetime.now(german_tz)
-
+db = PGDB()
 load_dotenv(".env")
 logger = logging.getLogger("inbound-agent")
 logger.setLevel(logging.INFO)
@@ -644,6 +645,22 @@ async def entrypoint(ctx: JobContext):
     
     if not agent_config:
         logger.error(f" No agent configured or minutes exhausted for: {phone_number}")
+        try:
+            agent_raw = db.get_agent_by_phone(phone_number)
+            transfer_number = agent_raw.get("transfer_number") if agent_raw else None
+            
+            if transfer_number:
+                logger.info(f"Transferring call to {transfer_number}")
+                for participant in ctx.room.remote_participants.values():
+                    await ctx.api.sip.transfer_sip_participant(
+                        TransferSIPParticipantRequest(
+                            room_name=ctx.room.name,
+                            participant_identity=participant.identity,
+                            transfer_to=f"tel:{transfer_number}",
+                        )
+                    )
+        except Exception as e:
+            logger.error(f"Transfer failed: {e}")
         return
     
     await dynamic_task

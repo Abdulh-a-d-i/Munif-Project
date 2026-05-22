@@ -89,6 +89,7 @@ class CreateAgentRequest(BaseModel):
     business_hours_end: Optional[str] = Field(default=None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
     allowed_minutes: Optional[int] = Field(default=0, ge=0)  # NEW
     user_id: Optional[int] = Field(default=None, gt=0)  # NEW: Assign agent to user
+    transfer_number: Optional[str] = Field(default=None, min_length=10, max_length=20)
     
     class Config:
         json_schema_extra = {
@@ -103,7 +104,8 @@ class CreateAgentRequest(BaseModel):
                 "owner_email": "john@example.com",
                 "business_hours_start": "09:00",
                 "business_hours_end": "17:00",
-                "allowed_minutes": 500
+                "allowed_minutes": 500,
+                "transfer_number": "+1234567890"
             }
         }
 
@@ -122,6 +124,7 @@ class UpdateAgentRequest(BaseModel):
     business_hours_end: Optional[str] = Field(None, pattern=r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$')  # NEW
     allowed_minutes: Optional[int] = Field(None, ge=0)  # NEW
     user_id: Optional[int] = Field(None, gt=0)  # NEW: Update user assignment
+    transfer_number: Optional[str] = Field(default=None, min_length=10, max_length=20)
     
     class Config:
         json_schema_extra = {
@@ -133,7 +136,8 @@ class UpdateAgentRequest(BaseModel):
                 "owner_email": "jane@example.com",
                 "business_hours_start": "08:00",
                 "business_hours_end": "18:00",
-                "allowed_minutes": 1000
+                "allowed_minutes": 1000,
+                "transfer_number": "+1234567890"
             }
         }
 
