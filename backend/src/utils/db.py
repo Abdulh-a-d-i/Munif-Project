@@ -325,6 +325,7 @@ class PGDB:
                         a.business_hours_start,
                         a.business_hours_end,
                         a.allowed_minutes,
+                        a.transfer_number,
                         COALESCE(a.used_minutes, 0) as used_minutes
                     FROM agents a
                     WHERE a.phone_number = %s 
@@ -1301,6 +1302,7 @@ class PGDB:
                         SELECT
                             a.id,
                             a.phone_number,
+                            a.transfer_number,
                             a.agent_name,
                             a.voice_type,
                             a.language,
@@ -1512,6 +1514,7 @@ class PGDB:
                         SELECT
                             a.id,
                             a.phone_number,
+                            a.transfer_number,
                             a.agent_name,
                             a.system_prompt,
                             a.voice_type,
@@ -1589,6 +1592,7 @@ class PGDB:
                             a.id,
                             a.agent_name,
                             a.phone_number,
+                            a.transfer_number,
                             a.voice_type,
                             a.language,
                             a.industry,
@@ -1747,17 +1751,18 @@ class PGDB:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                     cursor.execute("""
                         INSERT INTO agents (
-                            phone_number, agent_name, system_prompt,
+                            phone_number, transfer_number, agent_name, system_prompt,
                             voice_type, language, industry, 
                             owner_name, owner_email, avatar_url,
                             business_hours_start, business_hours_end,
                             allowed_minutes, used_minutes,
-                            admin_id, user_id, transfer_number
+                            admin_id, user_id
                         )
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING *;
                     """, (
                         agent_data["phone_number"],
+                        agent_data["transfer_number"],
                         agent_data["agent_name"],
                         agent_data["system_prompt"],
                         agent_data.get("voice_type", "female"),
@@ -1772,7 +1777,7 @@ class PGDB:
                         0,  # used_minutes starts at 0           # NEW
                         agent_data["admin_id"],
                         agent_data.get("user_id"),  # NEW: user assignment
-                        agent_data.get("transfer_number")  
+                          
                     ))
                     result = cursor.fetchone()
                 conn.commit()
@@ -1810,7 +1815,7 @@ class PGDB:
                 
                 allowed_fields = {
                     'agent_name', 'system_prompt', 'voice_type', 
-                    'language', 'industry', 'phone_number', 
+                    'language', 'industry', 'phone_number', 'transfer_number',
                     'owner_name', 'owner_email', 'avatar_url',
                     'business_hours_start', 'business_hours_end', 
                     'allowed_minutes', 'user_id'  
@@ -1891,6 +1896,7 @@ class PGDB:
                         SELECT 
                             a.id,
                             a.phone_number,
+                            a.transfer_number,
                             a.agent_name,
                             a.system_prompt,
                             a.voice_type,
@@ -2369,6 +2375,7 @@ class PGDB:
                         id AS agent_id,
                         agent_name,
                         phone_number,
+                        transfer_number,
                         owner_name,
                         owner_email,
                         industry,

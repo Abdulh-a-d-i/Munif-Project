@@ -889,6 +889,7 @@ async def update_user_agent(
     owner_name: str = Form(None),
     owner_email: str = Form(None),
     phone_number: str = Form(None),
+    transfer_number: str = Form(None),
     business_hours_start: str = Form(None),
     business_hours_end: str = Form(None),
     allowed_minutes: int = Form(None),
@@ -951,6 +952,8 @@ async def update_user_agent(
         if is_admin:
             if phone_number is not None:
                 updates["phone_number"] = phone_number
+            if transfer_number is not None:
+                updates["transfer_number"] = transfer_number
             if business_hours_start is not None:
                 updates["business_hours_start"] = business_hours_start
             if business_hours_end is not None:
@@ -963,6 +966,8 @@ async def update_user_agent(
             # Non-admin user trying to update restricted fields - return error
             if phone_number is not None:
                 return error_response("You don't have permission to update phone number", 403)
+            if transfer_number is not None:
+                return error_response("You don't have permission to update transfer number", 403)
             if business_hours_start is not None or business_hours_end is not None:
                 return error_response("You don't have permission to update business hours", 403)
             if allowed_minutes is not None:
