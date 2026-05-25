@@ -3623,29 +3623,59 @@ async def admin_delete_subscription_plan(
 
  
 @router.get("/twiml/check/{phone_number}")
-async def twiml_status_check(phone_number: str):
+async def twiml_status_check(phone_number: str, request: Request):
     """
-    Simple status check endpoint.
-    Returns agent status + minutes info for a phone number.
+    Called by agent.py before/during a call to check:
+    1. Agent exists and is active
+    2. Minutes are remaining
+    3. Returns transfer_number for fallback
+    Secured with AGENT_API_SECRET header.
     """
+    # Verify AGENT_API_SECRET
+    agent_secret = os.getenv("AGENT_API_SECRET", "")
+    auth_header = request.headers.get("Authorization", "")
+    if agent_secret and auth_header != f"Bearer {agent_secret}":
+        return JSONResponse({"available": False, "reason": "unauthorized"}, status_code=401)
+
     try:
         agent = db.get_agent_by_phone(phone_number)
         if not agent:
-            return JSONResponse({"available": False, "reason": "agent not found"}, status_code=404)
- 
+            return JSONResponse({
+                "available": False,
+                "reason": "agent not found",
+                "transfer_number": None
+            }, status_code=404)
+
         agent_id = agent.get("agent_id") or agent.get("id")
         minutes_check = db.check_agent_minutes_available(agent_id)
- 
+        transfer_number = agent.get("transfer_number")
+
+        is_active = agent.get("is_active", False)
+        minutes_available = minutes_check.get("available", False)
+        available = is_active and minutes_available
+
+        if not is_active:
+            reason = "agent inactive"
+        elif not minutes_available:
+            reason = "minutes exhausted"
+        else:
+            reason = None
+
         return JSONResponse({
-            "available": agent.get("is_active") and minutes_check.get("available"),
-            "is_active": agent.get("is_active"),
-            "minutes_available": minutes_check.get("available"),
+            "available": available,
+            "reason": reason,
+            "is_active": is_active,
+            "minutes_available": minutes_available,
             "used_minutes": minutes_check.get("used_minutes"),
             "allowed_minutes": minutes_check.get("allowed_minutes"),
             "remaining_minutes": minutes_check.get("remaining_minutes"),
-            "transfer_number": agent.get("transfer_number")
+            "transfer_number": transfer_number
         })
     except Exception as e:
         logging.error(f"Status check error: {e}")
-        return JSONResponse({"available": False, "reason": str(e)}, status_code=500)
- 
+        traceback.print_exc()
+        return JSONResponse({
+            "available": False,
+            "reason": str(e),
+            "transfer_number": None
+        }, status_code=500)
