@@ -657,15 +657,29 @@ async def entrypoint(ctx: JobContext):
 
             if transfer_number:
                 logger.info(f"Transferring call to {transfer_number}")
-                for participant in ctx.room.remote_participants.values():
-                    await ctx.api.sip.transfer_sip_participant(
-                        TransferSIPParticipantRequest(
-                            room_name=ctx.room.name,
-                            participant_identity=participant.identity,
-                            transfer_to=f"tel:{transfer_number}",
-                        )
-                    )
-                    logger.info(f"Transfer request sent for participant: {participant.identity}")
+
+                # Wait for participant to join room (max 10 seconds)
+                waited = 0
+                while not ctx.room.remote_participants and waited < 10:
+                    await asyncio.sleep(0.3)
+                    waited += 0.3
+
+                participants = list(ctx.room.remote_participants.values())
+                if not participants:
+                    logger.warning("No participants in room to transfer")
+                else:
+                    for participant in participants:
+                        try:
+                            await ctx.api.sip.transfer_sip_participant(
+                                TransferSIPParticipantRequest(
+                                    room_name=ctx.room.name,
+                                    participant_identity=participant.identity,
+                                    transfer_to=f"tel:{transfer_number}",
+                                )
+                            )
+                            logger.info(f"Transfer request sent for participant: {participant.identity}")
+                        except Exception as transfer_err:
+                            logger.error(f"Transfer failed for {participant.identity}: {transfer_err}")
             else:
                 logger.warning(f"No transfer_number set for {phone_number} — hanging up")
         except Exception as e:
