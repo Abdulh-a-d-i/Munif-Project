@@ -334,6 +334,28 @@ class PGDB:
                 """, (phone_number,))
                 return cursor.fetchone()
 
+    def get_agent_routing_info(self, phone_number: str):
+        """
+        Get agent routing info by phone number regardless of is_active status.
+        Used for routing decisions (transfer, reject) so transfer_number is
+        always accessible even when agent is inactive.
+        """
+        with self.get_connection_context() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        a.id AS agent_id,
+                        a.is_active,
+                        a.transfer_number,
+                        a.allowed_minutes,
+                        COALESCE(a.used_minutes, 0) as used_minutes
+                    FROM agents a
+                    WHERE a.phone_number = %s
+                    LIMIT 1
+                """, (phone_number,))
+                return cursor.fetchone()
+
+
     def get_agents_by_admin(self, admin_id: int):
         """Get all agents for a specific admin (agents created by this admin)"""
         with self.get_connection_context() as conn:

@@ -3625,57 +3625,69 @@ async def admin_delete_subscription_plan(
 @router.get("/twiml/check/{phone_number}")
 async def twiml_status_check(phone_number: str, request: Request):
     """
-    Called by agent.py before/during a call to check:
-    1. Agent exists and is active
-    2. Minutes are remaining
-    3. Returns transfer_number for fallback
+    Called by agent.py when no AI config is returned (minutes exhausted / agent inactive).
+    Uses get_agent_routing_info (no is_active filter) so transfer_number is always visible.
+    Returns an explicit 'action' field: "ai" | "transfer" | "reject"
     Secured with AGENT_API_SECRET header.
     """
     # Verify AGENT_API_SECRET
     agent_secret = os.getenv("AGENT_API_SECRET", "")
     auth_header = request.headers.get("Authorization", "")
     if agent_secret and auth_header != f"Bearer {agent_secret}":
-        return JSONResponse({"available": False, "reason": "unauthorized"}, status_code=401)
+        return JSONResponse({"action": "reject", "reason": "unauthorized"}, status_code=401)
 
     try:
-        agent = db.get_agent_by_phone(phone_number)
+        # Use routing info method — works for active AND inactive agents
+        agent = db.get_agent_routing_info(phone_number)
+
         if not agent:
+            logging.warning(f"twiml/check: No agent found for {phone_number}")
             return JSONResponse({
-                "available": False,
+                "action": "reject",
                 "reason": "agent not found",
                 "transfer_number": None
             }, status_code=404)
 
-        agent_id = agent.get("agent_id") or agent.get("id")
-        minutes_check = db.check_agent_minutes_available(agent_id)
+        agent_id = agent.get("agent_id")
+        is_active = agent.get("is_active", False)
         transfer_number = agent.get("transfer_number")
 
-        is_active = agent.get("is_active", False)
-        minutes_available = minutes_check.get("available", False)
-        available = is_active and minutes_available
-
+        # Determine action
         if not is_active:
-            reason = "agent inactive"
-        elif not minutes_available:
-            reason = "minutes exhausted"
+            # Agent is inactive — transfer if number is set, else reject
+            if transfer_number:
+                action = "transfer"
+                reason = "agent inactive"
+            else:
+                action = "reject"
+                reason = "agent inactive — no transfer number"
         else:
-            reason = None
+            # Agent is active — check minutes
+            minutes_check = db.check_agent_minutes_available(agent_id)
+            minutes_available = minutes_check.get("available", False)
+
+            if minutes_available:
+                action = "ai"
+                reason = None
+            else:
+                # Minutes exhausted — still pass transfer_number so caller can decide
+                action = "reject"
+                reason = "minutes exhausted"
+
+        logging.info(f"twiml/check [{phone_number}]: action={action}, reason={reason}")
 
         return JSONResponse({
-            "available": available,
+            "action": action,
             "reason": reason,
             "is_active": is_active,
-            "minutes_available": minutes_available,
-            "used_minutes": minutes_check.get("used_minutes"),
-            "allowed_minutes": minutes_check.get("allowed_minutes"),
-            "remaining_minutes": minutes_check.get("remaining_minutes"),
             "transfer_number": transfer_number
         })
+
     except Exception as e:
-        logging.error(f"Status check error: {e}")
+        logging.error(f"twiml/check error: {e}")
         traceback.print_exc()
         return JSONResponse({
-            "available": False,
+            "action": "reject",
             "reason": str(e),
             "transfer_number": None
-        }, status_code=500)
+        }, status_code=500)
