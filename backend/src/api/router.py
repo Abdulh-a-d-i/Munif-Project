@@ -3622,60 +3622,86 @@ async def admin_delete_subscription_plan(
     
 
  
-@router.get("/twiml/check/{phone_number}")
-async def twiml_status_check(phone_number: str, request: Request):
+@router.post("/twiml/incoming-call")
+async def twilio_incoming_call(request: Request):
     """
-    Called by agent.py before/during a call to check:
-    1. Agent exists and is active
-    2. Minutes are remaining
-    3. Returns transfer_number for fallback
-    Secured with AGENT_API_SECRET header.
+    Twilio Webhook: Checks agent status.
+    If active & has minutes -> Route to LiveKit SIP.
+    If inactive or no minutes -> Route to transfer_number.
     """
-    # Verify AGENT_API_SECRET
-    agent_secret = os.getenv("AGENT_API_SECRET", "")
-    auth_header = request.headers.get("Authorization", "")
-    if agent_secret and auth_header != f"Bearer {agent_secret}":
-        return JSONResponse({"available": False, "reason": "unauthorized"}, status_code=401)
+    # Twilio sends data as form fields, not JSON
+    form_data = await request.form()
+    called_number = form_data.get("To", "")
+    
+    response = VoiceResponse()
+
+    if not called_number:
+        response.say("Invalid phone number provided.")
+        response.hangup()
+        return Response(content=str(response), media_type="application/xml")
+
+    # Clean the number (remove any extra spaces)
+    clean_number = called_number.replace(" ", "")
 
     try:
-        agent = db.get_agent_by_phone(phone_number)
+        # 1. Fetch agent from DB
+        # Note: get_agent_by_phone only returns active agents in your current DB logic,
+        # but we handle the variables below to be safe.
+        agent = db.get_agent_by_phone(clean_number)
+
         if not agent:
-            return JSONResponse({
-                "available": False,
-                "reason": "agent not found",
-                "transfer_number": None
-            }, status_code=404)
+            response.say("Sorry, this number is not configured in our system.")
+            response.hangup()
+            return Response(content=str(response), media_type="application/xml")
 
         agent_id = agent.get("agent_id") or agent.get("id")
+        
+        # 2. Check minutes and active status
         minutes_check = db.check_agent_minutes_available(agent_id)
+        minutes_available = minutes_check.get("available", False)
+        
+        # In your db.py, get_agent_by_phone already filters by is_active=TRUE.
+        # But if you modify it later, this check is good to have.
+        is_active = agent.get("is_active", True) 
+        
+        # 3. Get transfer number
         transfer_number = agent.get("transfer_number")
 
-        is_active = agent.get("is_active", False)
-        minutes_available = minutes_check.get("available", False)
-        available = is_active and minutes_available
+        # Route Logic
+        if is_active and minutes_available:
+            # Condition True: Route to LiveKit SIP
+            # Make sure LIVEKIT_SIP_DOMAIN is in your .env (e.g., your-project.sip.livekit.cloud)
+            livekit_sip_domain = os.getenv("LIVEKIT_SIP_DOMAIN")
+            
+            if not livekit_sip_domain:
+                logging.error("LIVEKIT_SIP_DOMAIN is missing in environment variables.")
+                response.say("System configuration error. Goodbye.")
+                response.hangup()
+                return Response(content=str(response), media_type="application/xml")
 
-        if not is_active:
-            reason = "agent inactive"
-        elif not minutes_available:
-            reason = "minutes exhausted"
+            dial = Dial()
+            dial.sip(f"sip:{clean_number}@{livekit_sip_domain}")
+            response.append(dial)
+            
+            logging.info(f"Routing call to LiveKit SIP for agent {agent_id}")
+            
         else:
-            reason = None
+            # Condition False: Route to Transfer Number
+            if transfer_number:
+                dial = Dial()
+                dial.number(transfer_number)
+                response.append(dial)
+                logging.info(f"Routing call to transfer number {transfer_number} for agent {agent_id}")
+            else:
+                # Fallback if no transfer number is configured
+                response.say("We are sorry, the agent is currently unavailable.")
+                response.hangup()
+                logging.warning(f"Agent {agent_id} unavailable and no transfer number is set.")
 
-        return JSONResponse({
-            "available": available,
-            "reason": reason,
-            "is_active": is_active,
-            "minutes_available": minutes_available,
-            "used_minutes": minutes_check.get("used_minutes"),
-            "allowed_minutes": minutes_check.get("allowed_minutes"),
-            "remaining_minutes": minutes_check.get("remaining_minutes"),
-            "transfer_number": transfer_number
-        })
     except Exception as e:
-        logging.error(f"Status check error: {e}")
-        traceback.print_exc()
-        return JSONResponse({
-            "available": False,
-            "reason": str(e),
-            "transfer_number": None
-        }, status_code=500)
+        logging.error(f"Error in TwiML incoming call: {e}")
+        response.say("An internal system error occurred. Please try again later.")
+        response.hangup()
+
+    # Return standard XML format that Twilio expects
+    return Response(content=str(response), media_type="application/xml")

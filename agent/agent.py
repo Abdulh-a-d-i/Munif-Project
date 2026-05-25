@@ -645,46 +645,7 @@ async def entrypoint(ctx: JobContext):
     
     if not agent_config:
         logger.error(f" No agent configured or minutes exhausted for: {phone_number}")
-        try:
-            # fetch transfer_number from backend API
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    f"{BACKEND_API_URL}/twiml/check/{phone_number}",
-                    headers={"Authorization": f"Bearer {AGENT_API_SECRET}"}
-                )
-                data = response.json()
-                transfer_number = data.get("transfer_number")
-
-            if transfer_number:
-                logger.info(f"Transferring call to {transfer_number}")
-
-                # Wait for participant to join room (max 10 seconds)
-                waited = 0
-                while not ctx.room.remote_participants and waited < 10:
-                    await asyncio.sleep(0.3)
-                    waited += 0.3
-
-                participants = list(ctx.room.remote_participants.values())
-                if not participants:
-                    logger.warning("No participants in room to transfer")
-                else:
-                    for participant in participants:
-                        try:
-                            await ctx.api.sip.transfer_sip_participant(
-                                TransferSIPParticipantRequest(
-                                    room_name=ctx.room.name,
-                                    participant_identity=participant.identity,
-                                    transfer_to=f"tel:{transfer_number}",
-                                )
-                            )
-                            logger.info(f"Transfer request sent for participant: {participant.identity}")
-                        except Exception as transfer_err:
-                            logger.error(f"Transfer failed for {participant.identity}: {transfer_err}")
-            else:
-                logger.warning(f"No transfer_number set for {phone_number} — hanging up")
-        except Exception as e:
-            logger.error(f"Transfer failed: {e}")
-            traceback.print_exc()
+        
         return
     
     await dynamic_task
